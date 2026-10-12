@@ -2,6 +2,7 @@
 //
 // For the person: the /peer command. For Claude: SendMessage to the address "peer:<name>".
 // Inbound peer text becomes a prompt with a note that the text is untrusted.
+// Claude Code puts the name of the mod before each line that the mod shows.
 // The mod has no network code and gives no consent: the helper (peerlink.py) shows all dialogs.
 // Design: docs/2026-10-12-peer-link-design.md
 
@@ -50,7 +51,7 @@ function startHelper($) {
       starting = null
       open.clear()
       reject(new Error(problem))
-      $.ui.log(`peer link: ${problem}. All links are closed.`)
+      $.ui.log(`${problem}. All links are closed.`)
     })()
   })
   return starting
@@ -72,7 +73,7 @@ async function ctl($, req, timeoutMs = 30000) {
 
 function onEvent($, event) {
   const name = String(event.name ?? '')
-  const say = text => $.ui.log('peer link: ' + text)
+  const say = text => $.ui.log(text)
   if (event.ev === 'open') {
     open.set(name.toLowerCase(), name)
     say(`the link to "${name}" is open for ${event.minutes} minutes. Claude sends with SendMessage to "peer:${name}".`)
@@ -110,7 +111,7 @@ function deliver($, name, text, mark) {
   ].join('\n')
   inbound = inbound
     .then(() => $.prompt.submit({ text: prompt }))
-    .catch(err => $.ui.log(`peer link: a message from "${name}" was not delivered (${message(err)}).`))
+    .catch(err => $.ui.log(`a message from "${name}" was not delivered (${message(err)}).`))
 }
 
 export function register(on) {
@@ -123,14 +124,14 @@ export function register(on) {
         immediate: true,
       })
     } catch (err) {
-      $.ui.log('peer link: ' + message(err))
+      $.ui.log(message(err))
     }
     return next(e)
   })
 
   // The output is a dim line that Claude does not read. A ticket must not go into the model context.
   on('command.run', { command: 'peer' }, async ($, e) => {
-    const say = text => $.ui.log('peer link: ' + text)
+    const say = text => $.ui.log(text)
     if (e.origin?.kind !== 'composer') {
       say('the /peer command obeys only what the person types at this terminal.')
       return {}
@@ -151,7 +152,7 @@ export function register(on) {
       } else if (op === 'connect' && name) {
         say(await ctl($, { op, name, ticket }, LONG_MS))
       } else if (op === 'end' && name) {
-        say(await ctl($, { op, name }))
+        await ctl($, { op, name }) // the "closed" event of the helper is the answer line
       } else say(USAGE)
     } catch (err) {
       say(message(err) + '.')
