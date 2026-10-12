@@ -1,0 +1,12 @@
+{
+  "name": "zoreanuj-peer-link",
+  "description": "The peer link plugin: a link between Claude Code sessions of different persons.",
+  "owner": { "name": "ZoreAnuj" },
+  "plugins": [
+    {
+      "name": "peer-link",
+      "source": "./",
+      "description": "Link this session to a Claude Code session of a different person, with a popup consent and a 60-minute lease."
+    }
+  ]
+}
