@@ -117,6 +117,14 @@ async def test_pure():
         except PeerError:
             continue
         raise AssertionError(f"check_name accepted {bad!r}")
+    try:   # the person must see which name was refused
+        peerlink.check_name("<their name>")
+    except PeerError as e:
+        assert str(e).startswith('"<their name>" is not a valid name'), e
+    try:
+        peerlink.check_name("y" * 200)
+    except PeerError as e:
+        assert len(str(e)) < 260, len(str(e))
 
 
 async def test_accept():

@@ -194,7 +194,9 @@ _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,31}")
 def check_name(name):
     name = name.strip() if isinstance(name, str) else ""
     if not _NAME.fullmatch(name):
-        raise PeerError("a name has 1 to 32 letters, digits, spaces, '_' or '-', and starts with a letter or a digit")
+        shown = name if len(name) <= 40 else name[:40] + "..."
+        raise PeerError(f'"{shown}" is not a valid name: a name has 1 to 32 letters, digits, spaces, '
+                        "'_' or '-', and starts with a letter or a digit")
     return name
 
 

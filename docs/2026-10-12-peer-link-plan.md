@@ -124,4 +124,4 @@ Hooks: `session.start` (registers `/peer`), `command.run` for `peer`, `session.s
 **Files:** Modify `README.md`, `docs/README.md`.
 
 - [ ] `README.md`: what it is, install, use, security rules, limits, test commands.
-- [ ] Open a pull request from `v1-build` to `main`. Tell the "pr pipeline" session.
+- [ ] Push to `main`. The owner said on 2026-10-12: no branch and no pull request are necessary.
