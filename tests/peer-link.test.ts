@@ -16,14 +16,18 @@ type Fake = {
   prompts: { text: string; context?: readonly string[] }[] // prompts that reach Claude
   passed: string[]                    // `to` of each SendMessage that the mod let through
   stop: () => void                    // the helper process ends
+  hold: Promise<void> | null          // while set, the first prompt stays in its turn
 }
 
 // Register the stubs. `lines` are the helper output lines; a line that starts with "stderr:" goes to the error stream.
 // `answer` gives the ctl result for each request.
-function fake(on, lines: string[], answer: (req) => object = () => ({ ok: true, result: 'done' })): Fake {
+// `gate` is for a helper that answers a connect request only after it sent "open".
+function fake(on, lines: string[], answer: (req) => object = () => ({ ok: true, result: 'done' }), gate?: { late: string[] }): Fake {
   let stop = () => {}
   const stopped = new Promise<void>(resolve => { stop = resolve })
-  const f: Fake = { spawns: [], envs: [], requests: [], logs: [], copied: [], prompts: [], passed: [], stop }
+  let ask = () => {}
+  const asked = new Promise<void>(resolve => { ask = resolve })
+  const f: Fake = { spawns: [], envs: [], requests: [], logs: [], copied: [], prompts: [], passed: [], stop, hold: null }
   on('session.start', () => ({ cwd: '/work/demo' }))
   on('command.register', () => ({ value: undefined }))
   on('session.cwd', () => ({ value: '/work/demo' }))
@@ -37,16 +41,28 @@ function fake(on, lines: string[], answer: (req) => object = () => ({ ok: true, 
       if (line.startsWith('stderr:')) yield { stream: 'stderr', text: line.slice(7) + '\n' }
       else yield { stream: 'stdout', text: line + '\n' }
     }
+    if (gate) {
+      await asked                      // the lines of `gate.late` come while a connect request waits
+      for (const line of gate.late) yield { stream: 'stdout', text: line + '\n' }
+    }
     await stopped
     return { value: { code: 0, signal: null } }
   })
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     const sent = JSON.parse(e.init.stdin)
     f.envs.push(e.init.env)
+    if (gate && sent.req.op === 'connect') {
+      ask()
+      await tick()
+    }
     f.requests.push({ ...sent.req, _ctl: sent.ctl, _key: sent.key, _argv: e.argv.join(' ') })
     return { value: { exitCode: 0, stdout: JSON.stringify(answer(sent.req)) + '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('prompt.submit', ($, e) => { f.prompts.push({ text: e.text, context: e.context }); return { text: e.text } })
+  on('prompt.submit', async ($, e) => {
+    f.prompts.push({ text: e.text, context: e.context })
+    if (f.hold && f.prompts.length === 1) await f.hold
+    return { text: e.text }
+  })
   on('session.send', ($, e) => { f.passed.push(e.to); return { isDelivered: true } })
   return f
 }
@@ -220,12 +236,52 @@ test('status: the links and the saved contacts show', async ($, on) => {
   expect(shown).toMatch(/saved contacts: Bob, Carol/)
 })
 
-test('no helper: end, forget and status start no helper', async ($, on) => {
+test('no helper: end, stop and status start no helper', async ($, on) => {
   const f = fake(on, [READY])
   await peer($, 'end Bob')
+  await peer($, 'stop')
   await peer($, 'status')
   expect(f.spawns).toEqual([])
+  expect(f.requests).toEqual([])
   expect(f.logs.join('\n')).toMatch(/no links/)
+})
+
+test('forget without a helper: the request still goes to the helper, because the contact is on disk', async ($, on) => {
+  const f = fake(on, [READY], () => ({ ok: true, result: '"Bob" removed.' }))
+  await peer($, 'forget Bob')
+  expect(f.spawns.length).toBe(1)
+  expect(f.requests.at(-1)).toMatchObject({ op: 'forget', name: 'Bob' })
+  expect(f.logs.join('\n')).toMatch(/"Bob" removed/)
+})
+
+test('stop: the request goes to the helper', async ($, on) => {
+  const f = fake(on, [READY], req => ({ ok: true, result: 'answer for ' + req.op }))
+  await peer($, 'listen')
+  await peer($, 'stop')
+  expect(f.requests.at(-1)).toMatchObject({ op: 'stop' })
+  expect(f.logs.join('\n')).toMatch(/answer for stop/)
+})
+
+test('queue: peer text that waits behind a turn does not reach Claude after the link is closed', async ($, on) => {
+  const text = (n: number) => JSON.stringify({ ev: 'msg', name: 'Bob', text: 'text ' + n, mark: 'a1b2c3d' + n })
+  const closed = JSON.stringify({ ev: 'closed', name: 'Bob', reason: 'the local user ended the link' })
+  const f = fake(on, [READY, OPEN, text(1), text(2), text(3), closed])
+  let release = () => {}
+  f.hold = new Promise<void>(resolve => { release = resolve })
+  await peer($, 'listen')
+  await tick()
+  expect(f.prompts.length).toBe(1)      // the first message is in its turn, and two wait
+  release()
+  await tick()
+  expect(f.prompts.length).toBe(1)      // the link closed in the meantime: the two that waited are dropped
+})
+
+test('renewal line: /peer connect on an open link shows the answer of the helper', async ($, on) => {
+  const f = fake(on, [READY, OPEN], req => ({ ok: true, result: req.op === 'connect' ? 'Renewal request sent to "Bob".' : 'listening' }))
+  await peer($, 'listen')
+  await tick()
+  await peer($, 'connect Bob')
+  expect(f.logs.join('\n')).toMatch(/Renewal request sent to "Bob"/)
 })
 
 test('environment: the helper and each request run without the PYTHONPATH of the session', async ($, on) => {
@@ -241,10 +297,9 @@ test('connect answer: the request line shows only while the link is not open', a
   expect(waits.logs.join('\n')).toMatch(/Request sent to "Bob"/)
 })
 
-test('connect answer: no request line after the link is open', async ($, on) => {
-  const f = fake(on, [READY, OPEN], req => ({ ok: true, result: req.op === 'connect' ? 'Request sent to "Bob".' : 'listening' }))
-  await peer($, 'listen')
-  await tick()
+test('connect answer: no request line when the link opened before the answer came', async ($, on) => {
+  const f = fake(on, [READY], req => ({ ok: true, result: req.op === 'connect' ? 'Request sent to "Bob".' : 'listening' }), { late: [OPEN] })
   await peer($, 'connect Bob')
+  expect(f.logs.join('\n')).toMatch(/the link to "Bob" is open/)
   expect(f.logs.join('\n')).not.toMatch(/Request sent/)
 })

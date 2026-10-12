@@ -8,7 +8,7 @@
 // Design: docs/2026-10-12-peer-link-design.md
 
 const LONG_MS = 7 * 60 * 1000 // a request that waits for a person in a dialog (5 minutes) and for a dial
-const USAGE = 'use /peer invite <name> | connect <name> [ticket] | listen | end <name> | forget <name> | status'
+const USAGE = 'use /peer invite <name> | connect <name> [ticket] | listen | stop | end <name> | forget <name> | status'
 // The helper and the control process must not load a module from the session: no PYTHONPATH of the session.
 const ENV = { PYTHONPATH: '' }
 
@@ -120,8 +120,9 @@ function deliver($, name, text, mark) {
     text,
     `[end peer-text ${mark}]`,
   ].join('\n')
+  // A prompt can wait behind a turn. If the link closed in that time, the text does not go to Claude.
   inbound = inbound
-    .then(() => $.prompt.submit({ text: prompt }))
+    .then(() => (open.has(name.toLowerCase()) ? $.prompt.submit({ text: prompt }) : undefined))
     .catch(err => $.ui.log(`a message from "${name}" was not delivered (${message(err)}).`))
 }
 
@@ -131,7 +132,7 @@ export function register(on) {
       await $.command.register({
         name: 'peer',
         description: 'Link this session to a Claude Code session of a different person',
-        argumentHint: 'invite <name> | connect <name> [ticket] | listen | end <name> | forget <name> | status',
+        argumentHint: 'invite <name> | connect <name> [ticket] | listen | stop | end <name> | forget <name> | status',
         immediate: true,
       })
     } catch (err) {
@@ -152,9 +153,11 @@ export function register(on) {
     const ticket = op === 'connect' && /^peer\d\./.test(words.at(-1) ?? '') ? words.pop() : undefined
     const name = words.join(' ')
     try {
-      if (!helper && ['status', 'end', 'forget'].includes(op)) {
+      if (!helper && ['status', 'end', 'stop'].includes(op)) {
         // these do not start the helper
         say('no links. The helper is not started: /peer listen starts it.')
+      } else if (op === 'stop' && !name) {
+        say(await ctl($, { op }))
       } else if (op === 'status' && !name) {
         const { links, contacts } = await ctl($, { op })
         const lines = links.map(l => `"${l.name}" is ${l.state}, ${l.minutes_left} minutes left`)
@@ -169,8 +172,9 @@ export function register(on) {
         // "10 minutes" is TICKET_S in peerlink.py
         say(`invitation for "${name}", valid for 10 minutes and for one use${copy.isCopied ? ', now in the clipboard' : ''}. Send it through a private channel: ${made}`)
       } else if (op === 'connect' && name) {
+        const wasOpen = open.has(name.toLowerCase()) // then this is a renewal request
         const sent = await ctl($, { op, name, ticket }, LONG_MS)
-        if (!open.has(name.toLowerCase())) say(sent) // the "open" line of the helper can come first
+        if (wasOpen || !open.has(name.toLowerCase())) say(sent) // the "open" line of the helper can come first
       } else if (op === 'end' && name) {
         await ctl($, { op, name }) // the "closed" event of the helper is the answer line
       } else say(USAGE)

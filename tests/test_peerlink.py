@@ -34,7 +34,7 @@ from peerlink import PeerError, PeerLink  # noqa: E402
 
 SIDES = []
 HOMES = []
-KNOBS = ("LEASE_S", "TICKET_S", "PENDING_S", "PENDING_GRACE_S", "WARN_S", "RATE_PER_MIN", "REQ_PER_HOUR")
+KNOBS = ("LEASE_S", "TICKET_S", "PENDING_S", "PENDING_GRACE_S", "WARN_S", "RATE_PER_MIN", "REQ_PER_HOUR", "BINDS")
 
 
 class Side:
@@ -169,7 +169,7 @@ async def test_accept():
     m = await a.wait("msg")
     assert m["name"] == "Bob" and m["text"] == "hi ‹b› there", m
     assert len(m["mark"]) == 8 and int(m["mark"], 16) >= 0
-    assert b.asked("Send this message")[0]["body"] == "hi <b>\x07 there"
+    assert b.asked("Send this message")[0]["body"] == "hi <b> there"   # the bell character is not visible, so it does not leave
 
     await a.pl.send("Bob", "hello Bob")
     m2 = await b.wait("msg")
@@ -231,7 +231,7 @@ async def test_renewal():
     await b.pl.connect("Alice")  # no ticket and a live link: a renewal request
     assert (await a.wait("renewed", 5))["name"] == "Bob"
     assert (await b.wait("renewed", 5))["name"] == "Alice"
-    assert not b.asked('Ask "Alice"'), "a typed renewal request showed a local dialog"
+    assert len(b.asks) == 1, f"a typed renewal request showed a local dialog: {b.asks}"   # only the first connect
     assert a.asked("Renew the connection")[0]["sound"]
     await asyncio.sleep(max(0.0, 4.8 - (time.monotonic() - t0)))  # past the first lease end
     assert [x["state"] for x in a.pl.status() + b.pl.status()] == ["open", "open"]
@@ -378,8 +378,9 @@ async def test_ctl():
             assert (await ctl(ready["key"], {"op": "status"}))[1]["ok"] is True
         finally:
             silent.close()
-        serve.stdout.close()   # the mod is gone: the helper must stop at its next output line
-        assert await asyncio.wait_for(asyncio.to_thread(serve.wait), 20) == 0
+        code, answer = await ctl(ready["key"], {"op": "stop"})   # the person types /peer stop
+        assert code == 0 and answer["ok"] is True, answer
+        assert await asyncio.wait_for(asyncio.to_thread(serve.wait), 8) == 0
         if os.name == "posix":
             assert not os.path.exists(os.path.dirname(ready["ctl"])), "the socket directory stayed"
     finally:
@@ -540,7 +541,7 @@ async def test_saved_contact_needs_no_ticket():
     assert (await a2.wait("msg"))["text"] == "hello again"
     await a2.pl.connect("Bob")                          # a renewal, typed by Alice: no dialog on her side
     await b2.wait("renewed", 10)
-    assert not a2.asked("Ask ")
+    assert not [x for x in a2.asks if "Accept connection" not in x["text"]], a2.asks   # no dialog for the request that Alice typed
 
 
 async def test_one_helper_for_each_identity():
@@ -571,6 +572,127 @@ async def test_forget():
     assert len(a.asked("Accept connection")) == 1, "a forgotten contact made a popup"
     assert "no ticket" in await raises(a.pl.connect, "Bob")
     assert await raises(a.pl.forget, "Bob")
+
+
+async def test_two_requests_at_the_same_time():
+    """Review 2, item 1: the two persons type /peer connect at the same time. One link stays open."""
+    for gap in (0.0, 0.3):
+        peerlink.LEASE_S, peerlink.WARN_S = 2.0, 0.5
+        a, b = await linked()
+        await a.wait("closed", 8)
+        await b.wait("closed", 8)
+        peerlink.LEASE_S = 60.0
+        first = asyncio.ensure_future(a.pl.connect("Bob"))
+        await asyncio.sleep(gap)
+        second = asyncio.ensure_future(b.pl.connect("Alice"))
+        await asyncio.gather(first, second, return_exceptions=True)
+        await a.wait("open", 20)
+        await b.wait("open", 20)
+        await asyncio.sleep(3.0)
+        states = [x["state"] for x in a.pl.status() + b.pl.status()]
+        assert states == ["open", "open"], (gap, states, a.events[-4:], b.events[-4:])
+        await b.pl.send("Alice", "still here")
+        assert (await a.wait("msg", 5))["text"] == "still here"
+        await a.pl.close()
+        await b.pl.close()
+
+
+async def test_forget_removes_each_name_of_the_key():
+    """Review 2, item 2: one key with two names. After forget, that key gets no dialog."""
+    a, b = Side("alice", home=home()), Side("bob", home=home())
+    await up(a, b)
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await a.wait("open")
+    await b.wait("open")
+    await b.pl.end("Alice")
+    await a.wait("closed", 5)
+    await b.pl.connect("Alice", await a.pl.invite("Robert"))   # the same key under a second name
+    await a.wait("open")
+    await b.wait("open")
+    assert a.pl.contact_names() == ["Bob", "Robert"]
+    await a.pl.forget("Bob")
+    assert a.pl.contact_names() == [] and a.pl.status() == []
+    await b.wait("closed", 5)
+    before = len(a.asked("Accept connection"))
+    await b.pl.connect("Alice")
+    await b.wait("denied", 15)
+    assert len(a.asked("Accept connection")) == before, "a forgotten key got a dialog under its second name"
+
+
+async def test_ticket_for_a_saved_name_warns():
+    """Review 2, item 3: a ticket that changes the key of a saved contact says so in the dialog."""
+    a, b, c = Side("alice"), Side("bob"), Side("carol")
+    await up(a, b, c)
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await a.wait("open")
+    await b.wait("open")
+    await b.pl.end("Alice")
+    await a.wait("closed", 5)
+    await c.pl.connect("Alice", await a.pl.invite("bob"))      # a different key uses a ticket for the saved name
+    await a.wait("open", 15)
+    accept = [x["text"] for x in a.asked("Accept connection")]
+    assert "replaces" not in accept[0] and 'replaces your saved contact "Bob"' in accept[1], accept
+    await b.pl.connect("alice", await c.pl.invite("Bob"))      # the dialer side: a ticket of Carol for the saved name
+    connect = [x["text"] for x in b.asked("Connect this session")]
+    assert "replaces" not in connect[0] and 'replaces your saved contact "Alice"' in connect[1], connect
+
+
+async def test_hidden_characters_do_not_leave():
+    """Review 2, item 4: the person sees in the dialog exactly the text that leaves."""
+    a, b = await linked()
+    frames, write = [], b.pl._write
+
+    async def spy(link, frame):
+        frames.append(frame)
+        await write(link, frame)
+    b.pl._write = spy
+    await b.pl.send("Alice", "price" + chr(0x200B) + chr(0xE0041) + chr(0xE0042) + " list" + chr(0x202E))
+    shown = b.asked("Send this message")[0]
+    assert shown["body"] == "price list" and "4 hidden characters" in shown["text"], shown
+    assert frames[-1] == {"t": "msg", "text": "price list"}, frames[-1]
+    assert (await a.wait("msg"))["text"] == "price list"
+    assert "empty" in await raises(b.pl.send, "Alice", chr(0x200B) * 5)
+
+
+async def test_bind_must_be_loopback():
+    """Review 2, item 6: if the endpoint gets a socket that is not loopback, the helper does not start."""
+    peerlink.BINDS = (("127.0.0.1:0",),)   # as on a machine where [::1] cannot bind: iroh then adds a socket on [::]
+    a = Side("alice")
+    assert "loopback" in await raises(a.pl.start)
+    assert a.pl.ep is None
+
+
+async def test_contact_save_error_keeps_the_lease():
+    """Review 2: a contact file that cannot be written must not leave a link without a lease."""
+    peerlink.LEASE_S, peerlink.WARN_S = 3.0, 0.5
+    a, b = Side("alice", home=home()), Side("bob")
+    await up(a, b)
+
+    def broken(name, text):
+        raise OSError("read-only")
+    a.pl._write_private = broken
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await a.wait("open")
+    await b.wait("open")
+    await b.pl.send("Alice", "works")
+    assert (await a.wait("msg", 5))["text"] == "works"
+    await a.wait("closed", 6)
+
+
+async def test_helper_stops_with_its_reader():
+    """The mod is gone: the helper must stop at its next output line and remove its socket directory."""
+    helper = os.path.join(ROOT, "peerlink.py")
+    env = dict(os.environ, PEERLINK_HOME=home())
+    serve = subprocess.Popen([sys.executable, helper, "serve", "reader test"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env)
+    try:
+        ready = json.loads(await asyncio.wait_for(asyncio.to_thread(serve.stdout.readline), 30))
+        serve.stdout.close()
+        assert await asyncio.wait_for(asyncio.to_thread(serve.wait), 20) == 0
+        if os.name == "posix":
+            assert not os.path.exists(os.path.dirname(ready["ctl"])), "the socket directory stayed"
+    finally:
+        if serve.poll() is None:
+            serve.kill()
 
 
 async def test_dialog():

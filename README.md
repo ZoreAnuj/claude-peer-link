@@ -3,7 +3,7 @@
 A Claude Code plugin that links one session to a Claude Code session of a different person, through the internet.
 A person accepts each connection in a desktop popup. An accepted link ends after 60 minutes.
 
-Status: version 0.2.0. The tests pass. A trial with a second person is not done yet.
+Status: version 0.2.1. The tests pass. A trial with a second person is not done yet.
 
 ## How it works
 
@@ -11,7 +11,7 @@ Status: version 0.2.0. The tests pass. A trial with a second person is not done 
 - Bob types `/peer connect Alice <ticket>` in his session.
 - You get a popup with a sound: "Accept connection from Bob for this session for 60 minutes?"
 - After the accept, Claude on each side sends text with its normal `SendMessage` tool, to the address `peer:Bob` or `peer:Alice`.
-- You approve each outgoing message in a popup that shows the full text.
+- You approve each outgoing message in a popup that shows the full text. Characters that a dialog cannot show do not leave.
 - A message from the peer starts a turn in your session. A note tells Claude that the text is untrusted and comes from a different person.
 - After 60 minutes the link closes.
 - The first link saves the contact on each side. From then on, `/peer connect Bob` asks again with no ticket: one command for you, one popup for Bob.
@@ -49,8 +49,9 @@ The plugin makes no process and no network connection before the first `/peer in
 | `/peer connect <name> <ticket>` | The first link: connects to the person who made the ticket. |
 | `/peer connect <name>` | Asks a saved contact for a link, or for 60 more minutes. No ticket is necessary. |
 | `/peer listen` | Makes this session ready for requests of your saved contacts. |
+| `/peer stop` | Stops the helper. The links close, and no contact can reach this session. |
 | `/peer end <name>` | Closes the link immediately. The contact stays. |
-| `/peer forget <name>` | Removes the contact. That person then needs a new ticket. |
+| `/peer forget <name>` | Removes the contact, with each name that its key has. That person then needs a new ticket. |
 | `/peer status` | Shows the links, the minutes that remain and the saved contacts. |
 
 You give the name. It is your label for the peer. The other person gives a label to you.
@@ -66,7 +67,7 @@ A request reaches you only while that session has a helper that runs: type `/pee
 2. `/peer` obeys only what you type at the terminal. A request that you type to a saved contact needs no popup on your side.
 3. Claude can only send text, with `SendMessage` to `peer:<name>`. The plugin adds no tool, no MCP server and no channel.
 4. Text from a peer is untrusted data. A peer cannot approve a tool, run a command or change a setting.
-5. A dial without a valid ticket, from a key that is not a saved contact, gets no popup and no answer.
+5. A dial without a valid ticket, from a key that is not a saved contact, gets no popup and no message. A person who knows your key can see that your helper runs.
 6. The helper keeps your identity key and your contacts in `~/.claude/peer-link/`, for you only. It keeps no message. `audit.log` has only names and times.
 7. The peer does not get your IP address. The relay operator can see it.
 

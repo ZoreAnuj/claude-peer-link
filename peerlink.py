@@ -44,6 +44,7 @@ MAX_FRAME = 65536
 RATE_PER_MIN = 30        # inbound messages for each link
 REQ_PER_HOUR = 3         # requests without a ticket, and renewal requests, for each peer
 MAX_LINKS = 4
+BINDS = (("127.0.0.1:0", "[::1]:0"), ("127.0.0.1:0",))   # the second is for a machine without IPv6
 HEARTBEAT_S = 10.0       # the helper stops when it cannot write this line to the mod
 TITLE = "Peer link"
 
@@ -158,14 +159,20 @@ async def ask(title, text, body="", sound=False, yes="Accept", timeout=None):
 # ---------------------------------------------------------------- text, codes, tickets
 
 _HIDDEN = ("Cc", "Cf", "Cs", "Co")
-_SWAP = str.maketrans({"<": "‹", ">": "›", "＜": "‹", "＞": "›", " ": "\n", " ": "\n"})
+_LINES = str.maketrans({chr(0x2028): "\n", chr(0x2029): "\n"})   # line and paragraph separator
+_BRACKETS = str.maketrans({ch: chr(0x2039) for ch in ("<", chr(0xFF1C), chr(0xFE64))}
+                          | {ch: chr(0x203A) for ch in (">", chr(0xFF1E), chr(0xFE65))})
+
+
+def visible(text):
+    """Text without characters that a person cannot see in a dialog: control, format and hidden characters."""
+    return "".join(ch for ch in text.translate(_LINES)
+                   if ch in "\n\t" or (unicodedata.category(ch) not in _HIDDEN and not 0xE0100 <= ord(ch) <= 0xE01EF))
 
 
 def sanitize(text):
-    """Peer text for the model: no control, format or hidden characters, no angle brackets."""
-    kept = (ch for ch in text.translate(_SWAP)
-            if ch in "\n\t" or (unicodedata.category(ch) not in _HIDDEN and not 0xE0100 <= ord(ch) <= 0xE01EF))
-    return "".join(kept)
+    """Peer text for the model: only visible characters, and no angle brackets."""
+    return visible(text).translate(_BRACKETS)
 
 
 def code_for(a, b):
@@ -311,7 +318,7 @@ class PeerLink:
             code = code_for(bytes.fromhex(self.me), bytes.fromhex(peer))
             if not await self._consent(
                     f'Connect this session{self._where()} to "{name}" for {self._minutes()} minutes?\n\n'
-                    f"Code {code}. The code must be the same on the two screens.", yes="Connect"):
+                    f"Code {code}. The code must be the same on the two screens.{self._replaces(name, peer)}", yes="Connect"):
                 raise PeerError("the local user refused in the dialog")
         elif key in self.contacts:
             # the person typed the command for a saved contact: that is the consent of this side
@@ -341,18 +348,18 @@ class PeerLink:
 
     async def send(self, name, text):
         link = self._live(self.links.get(check_name(name).lower()), name)
-        try:
-            size = len(text.encode("utf-8")) if isinstance(text, str) and text.strip() else 0
-        except UnicodeEncodeError:
-            size = 0
-        if size == 0:
+        # The person approves the text in a dialog, so only characters that a dialog shows can leave.
+        clean = visible(text) if isinstance(text, str) else ""
+        if not clean.strip():
             raise PeerError("the message is empty or is not valid text")
-        if size > MAX_MSG_BYTES:
+        if len(clean.encode("utf-8")) > MAX_MSG_BYTES:
             raise PeerError(f"the message is larger than {MAX_MSG_BYTES} bytes")
-        if not await self._consent(f'Send this message to "{link.name}"?', body=text, yes="Send"):
+        hidden = len(text) - len(clean)
+        note = f"\n\n{hidden} hidden characters were removed." if hidden else ""
+        if not await self._consent(f'Send this message to "{link.name}"?{note}', body=clean, yes="Send"):
             raise PeerError("the local user refused this message in the dialog")
         self._live(link, name)
-        await self._write(link, {"t": "msg", "text": text})
+        await self._write(link, {"t": "msg", "text": clean})
         return f'Sent to "{link.name}".'
 
     async def end(self, name):
@@ -366,13 +373,16 @@ class PeerLink:
         """Remove a saved contact. Its key gets no dialog after this, and a new link needs a new ticket."""
         key = check_name(name).lower()
         self._load()
-        contact, link = self.contacts.pop(key, None), self.links.get(key)
+        contact, link = self.contacts.get(key), self.links.get(key)
         if contact is None and link is None:
             raise PeerError(f'no contact with the name "{name}"')
+        peer = contact["key"] if contact else link.peer
+        names = [c["name"] for c in self.contacts.values() if c["key"] == peer] or [link.name]
+        self.contacts = {k: c for k, c in self.contacts.items() if c["key"] != peer}   # each name of this key
         self._save_contacts()
-        if link is not None:
-            await self._end(link, "the local user removed the contact", why="user")
-        return f'"{(contact or {"name": link.name})["name"]}" is removed. A new link to this peer needs a new ticket.'
+        for other in [x for x in self.links.values() if x.peer == peer]:
+            await self._end(other, "the local user removed the contact", why="user")
+        return " and ".join(f'"{n}"' for n in names) + " removed. A new link to this peer needs a new ticket."
 
     def status(self):
         now = time.monotonic()
@@ -465,7 +475,7 @@ class PeerLink:
             mode = iroh.RelayMode.custom_from_urls(self._relay_urls) if self._relay_urls else iroh.RelayMode.default_mode()
             ep = None
             # Relay only: no socket on an address of this machine that a peer can reach, so no IP address goes to the peer.
-            for binds in (("127.0.0.1:0", "[::1]:0"), ("127.0.0.1:0",)):   # the second is for a machine without IPv6
+            for binds in BINDS:
                 builder = iroh.EndpointBuilder()
                 builder.apply_minimal()   # no address lookup service
                 builder.relay_mode(mode)
@@ -482,6 +492,9 @@ class PeerLink:
             try:
                 if ep is None:
                     raise PeerError("the endpoint did not start")
+                if not all(str(address).startswith(("127.", "[::1]:")) for address in ep.bound_sockets()):
+                    raise PeerError("the endpoint has a socket that is not on a loopback address. "
+                                    "The peer link does not start, because a peer could see an IP address of this machine")
                 await asyncio.wait_for(ep.online(), 30)
             except Exception as e:
                 if ep is not None:
@@ -551,8 +564,8 @@ class PeerLink:
             origin = "a saved contact" if saved else "new, with your invitation"
             ok = await self._consent(
                 f'Accept connection from "{name}" ({origin}) for this session{self._where()} '
-                f"for {self._minutes()} minutes?\n\nCode {code}. The code must be the same on the two screens.",
-                sound=True)
+                f"for {self._minutes()} minutes?\n\nCode {code}. The code must be the same on the two screens."
+                f"{self._replaces(name, peer)}", sound=True)
             link = Link(name, peer, conn, bi.send())
             if not ok:
                 await asyncio.wait_for(self._write(link, {"t": "deny"}), 5)
@@ -591,8 +604,13 @@ class PeerLink:
         else:
             name = next((c["name"] for c in self.contacts.values() if c["key"] == peer), None)
             found = (name, True) if name is not None and self._request_ok(peer) else None
-        if found and found[0].lower() not in self.links and len(self.links) >= MAX_LINKS:
+        if found is None:
             return None
+        mine = self.links.get(found[0].lower())
+        if mine is None:
+            return found if len(self.links) < MAX_LINKS else None
+        if mine.state == "pending" and mine.peer == peer and self.me > peer:
+            return None   # the two sides asked at the same time: the request of the side with the higher key is used
         return found
 
     def _request_ok(self, peer):
@@ -610,7 +628,11 @@ class PeerLink:
         link.state = "open"
         self._extend(link)
         self.contacts[link.key] = {"name": link.name, "key": link.peer}   # the two keys are now paired
-        self._save_contacts()
+        try:
+            self._save_contacts()
+        except OSError as e:   # the mod shows lines with this mark to the person
+            print(f"peerlink: the contact could not be saved ({type(e).__name__}). "
+                  "After a restart, this peer needs a new ticket.", file=sys.stderr, flush=True)
         self.emit({"ev": "open", "name": link.name, "minutes": self._minutes()})
         self._audit("accept", link)
 
@@ -775,6 +797,13 @@ class PeerLink:
     def _minutes(self):
         return max(1, round(LEASE_S / 60))
 
+    def _replaces(self, name, peer):
+        """A line for a dialog, if the accept changes the key of a saved contact."""
+        saved = self.contacts.get(name.lower())
+        if saved is None or saved["key"] == peer:
+            return ""
+        return f'\n\nThis replaces your saved contact "{saved["name"]}", which has a different key.'
+
     def _where(self):
         return f' ("{self.session}")' if self.session else ""
 
@@ -820,6 +849,8 @@ async def _dispatch(pl, req):
             result = await pl.forget(req.get("name"))
         elif op == "status":
             result = {"links": pl.status(), "contacts": pl.contact_names()}
+        elif op == "stop":   # the control thread stops the helper after it sent this answer
+            result = "The helper stops. This session does not listen now."
         else:
             raise PeerError("unknown request")
         return {"ok": True, "result": result}
@@ -829,7 +860,7 @@ async def _dispatch(pl, req):
         return {"ok": False, "error": f"helper error: {type(e).__name__}"}
 
 
-def _ctl_serve(listener, loop, pl, key):
+def _ctl_serve(listener, loop, pl, key, stop):
     """Thread: one short connection for each request, each in its own thread.
 
     The key is proved in that thread before a request is read, so a silent client stops only itself."""
@@ -840,8 +871,10 @@ def _ctl_serve(listener, loop, pl, key):
             multiprocessing.connection.deliver_challenge(conn, key)
             multiprocessing.connection.answer_challenge(conn, key)
             req = json.loads(conn.recv_bytes(32 * MAX_FRAME))
-            coro = _dispatch(pl, req if isinstance(req, dict) else {})
-            conn.send_bytes(json.dumps(asyncio.run_coroutine_threadsafe(coro, loop).result()).encode())
+            req = req if isinstance(req, dict) else {}
+            conn.send_bytes(json.dumps(asyncio.run_coroutine_threadsafe(_dispatch(pl, req), loop).result()).encode())
+            if req.get("op") == "stop":
+                loop.call_soon_threadsafe(stop.set)
         except Exception:   # a wrong key, a client that left, a request that is not JSON
             pass
         finally:
@@ -879,7 +912,7 @@ async def serve(label):
     pl = PeerLink(emit, session=label, home=home)
     key, address = secrets.token_bytes(32), _ctl_address()
     listener = multiprocessing.connection.Listener(address, family=CTL_FAMILY)
-    threading.Thread(target=_ctl_serve, args=(listener, loop, pl, key), daemon=True).start()
+    threading.Thread(target=_ctl_serve, args=(listener, loop, pl, key, stop), daemon=True).start()
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGTERM, stop.set)   # close the links with a last message
     emit({"ev": "ready", "ctl": address, "key": key.hex()})

@@ -151,4 +151,17 @@ Requests: `{"op":"listen"}`, `{"op":"forget","name"}`. `status` answers `{"links
 - [x] The fixes and the feature in `peerlink.py`. 28 helper tests pass.
 - [x] Mod: `listen`, `forget`, the new `status`, no helper start for `end`, `forget` and `status`, text only for open links, empty `PYTHONPATH`. 19 mod tests pass.
 - [x] End-to-end with two real sessions: first link with a ticket, second request with no ticket, the same after a restart.
-- [ ] Push to `main`. CI on three systems and the cross-network test.
+- [x] Push to `main`. CI on three systems and the cross-network test: all passed for commit `9116277`.
+
+### Task 8: Fixes from the review of version 0.2.0 (version 0.2.1)
+
+The second review found no critical defect and six important ones. Each has a test that failed first.
+
+- [x] The two persons ask at the same time: the request of the side with the higher key is used.
+- [x] `/peer forget` removes each name of the key, and works without a running helper.
+- [x] A ticket that changes the key of a saved contact says so in the dialog.
+- [x] Characters that a dialog cannot show are removed before the send dialog.
+- [x] The mod drops peer text that waited behind a turn when the link closed.
+- [x] A socket that is not loopback stops the start of the helper.
+- [x] Also: `/peer stop`, the renewal line, a contact file that cannot be written, ASCII source.
+- [ ] Push to `main`. CI on three systems.
