@@ -5,8 +5,9 @@ Tests for the peer link.
 | File | Content |
 |---|---|
 | `test_peerlink.py` | Helper tests. Two helpers run in one process and connect through the public relay. The consent dialog is replaced in the test process only. |
-
 | `peer-link.test.ts` | Mod tests. A fake helper stands for `peerlink.py`. |
+| `cross_accept.py` | Cross-network test, runner side. A commit message with `[cross]` starts it on a GitHub runner of each system. |
+| `cross_dial.py` | Cross-network test, laptop side: `uv run --managed-python --script tests/cross_dial.py <run id>`. |
 | `autoaccept_helper.py` | Test only: the real helper with each dialog answered by an accept. It is not part of the plugin. Its first lines say how to make the test copy of the plugin. |
 
 Run the mod tests from the repository directory:

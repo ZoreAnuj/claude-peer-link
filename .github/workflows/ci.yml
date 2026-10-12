@@ -1,0 +1,48 @@
+name: ci
+
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  helper:
+    name: helper tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PEERLINK_TEST_DIALOG: "1"   # show the real consent dialog one time
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Helper tests with a virtual display
+        if: runner.os == 'Linux'
+        run: |
+          command -v xvfb-run || sudo apt-get install -y xvfb
+          xvfb-run -a uv run --managed-python --script tests/test_peerlink.py
+      - name: Helper tests
+        if: runner.os != 'Linux'
+        run: uv run --managed-python --script tests/test_peerlink.py
+
+  # Cross-network test: only for a commit message with [cross].
+  # The runner waits for a dial from the laptop: tests/cross_dial.py <run id>
+  cross:
+    name: cross-network (${{ matrix.os }})
+    if: contains(github.event.head_commit.message, '[cross]')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Wait for the dial from the laptop
+        env:
+          PEERLINK_CROSS_ID: ${{ github.run_id }}-${{ runner.os }}
+        run: uv run --managed-python --script tests/cross_accept.py
