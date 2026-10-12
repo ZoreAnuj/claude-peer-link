@@ -1,6 +1,6 @@
 {
   "name": "peer-link",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Link this session to a Claude Code session of a different person. Two persons pair their systems one time in a desktop popup. After that, the Claude agents accept a link and exchange messages. A link ends after 60 minutes.",
   "author": { "name": "ZoreAnuj" }
 }

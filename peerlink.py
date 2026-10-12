@@ -241,7 +241,8 @@ class Link:
     peer: str                  # the public key of the peer, hex
     conn: object
     tx: object
-    state: str = "pending"     # "pending" until the remote person accepts, then "open", then "closed"
+    state: str = "pending"     # "pending" until the other side accepts, then "open", then "closed"
+    ours: bool = False         # this side dialed the connection of this link
     expires: float = 0.0       # monotonic clock
     expires_wall: float = 0.0  # wall clock, so that a suspended computer does not extend the lease
     warned: bool = False
@@ -333,16 +334,25 @@ class PeerLink:
         conn = await self._dial(peer, name)
         try:
             bi = await asyncio.wait_for(conn.open_bi(), 10)
-            link = Link(name, peer, conn, bi.send())
+            link = Link(name, peer, conn, bi.send(), ours=True)
             await asyncio.wait_for(self._write(link, {"t": "hello", "secret": secret} if secret else {"t": "hello"}), 10)
-            if key in self.links:   # a request of the peer was accepted during the dial: one link for each name
-                raise PeerError(f'a link to "{name}" opened during the dial')
-        except PeerError:
-            conn.close(0, b"")
-            raise
         except Exception:
             conn.close(0, b"")
             raise PeerError(f'"{name}" did not answer') from None
+        # No await from here to the insert: one link for each name, each under a lease.
+        existing = self.links.get(key)
+        if existing is not None:
+            # A request of the same peer was accepted during the dial. The two sides use one rule,
+            # so that one connection stays: the connection that the side with the higher key dialed.
+            asked_too = existing.peer == peer and not existing.ours
+            if asked_too and self.me > peer:
+                self._detach(existing, "the two sides asked at the same time; the request of this side is used")
+                self._spawn(self._goodbye(existing, "user"))
+            else:
+                conn.close(0, b"")
+                if asked_too and existing.state == "open":
+                    return f'A link to "{name}" is open: the peer asked at the same time.'
+                raise PeerError(f'a link to "{name}" opened during the dial')
         link.expires = time.monotonic() + PENDING_S + PENDING_GRACE_S
         link.expires_wall = time.time() + PENDING_S + PENDING_GRACE_S
         self.links[key] = link   # no await after the look at the table
@@ -572,7 +582,13 @@ class PeerLink:
             name, saved = admitted
             self.pending.add(peer)
             waits = True
-            if saved:   # the two persons paired these systems before: the Claude agent of this session answers
+            mine = self.links.get(name.lower())
+            asked_too = saved and mine is not None and mine.ours and mine.peer == peer   # this side asked the same peer
+            if asked_too and self.me > peer:
+                return   # the two sides asked at the same time: the connection of the side with the higher key is used
+            if asked_too:
+                ok = True   # the person of this side asked for this link: no second decision is necessary
+            elif saved:   # the two persons paired these systems before: the Claude agent of this session answers
                 ok = await self._decide(name, "connect")
             else:       # the first request of this key: the person answers
                 code = code_for(bytes.fromhex(self.me), bytes.fromhex(peer))
@@ -589,10 +605,12 @@ class PeerLink:
             await asyncio.wait_for(self._write(link, {"t": "accept"}), 5)
             # From here to the end of the block there is no await: one link for each name, each under a lease.
             old = self.links.get(link.key)
+            if old is not None and old.ours and old.peer == peer and self.me > peer:
+                return   # this side asked the same peer during the decision, and its connection is the one that is used
             if old is not None:
                 self._detach(old, "a new link replaced it")
             self.links[link.key] = link
-            self._open(link, "the Claude agent" if saved else "the person")
+            self._open(link, "the two sides at the same time" if asked_too else "the Claude agent" if saved else "the person")
             link.tasks = [self._spawn(self._reader(link, frames)), self._spawn(self._lease(link))]
             conn = None   # the link owns the connection now
             if old is not None:
@@ -619,13 +637,8 @@ class PeerLink:
         else:
             name = next((c["name"] for c in self.contacts.values() if c["key"] == peer), None)
             found = (name, True) if name is not None and self._request_ok(peer) else None
-        if found is None:
+        if found and found[0].lower() not in self.links and len(self.links) >= MAX_LINKS:
             return None
-        mine = self.links.get(found[0].lower())
-        if mine is None:
-            return found if len(self.links) < MAX_LINKS else None
-        if mine.state == "pending" and mine.peer == peer and self.me > peer:
-            return None   # the two sides asked at the same time: the request of the side with the higher key is used
         return found
 
     def _request_ok(self, peer):

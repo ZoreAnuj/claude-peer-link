@@ -40,12 +40,12 @@ KNOBS = ("LEASE_S", "TICKET_S", "PENDING_S", "PENDING_GRACE_S", "WARN_S", "RATE_
 class Side:
     """One helper with a recorded, scripted person (the dialogs) and a scripted Claude agent (the requests)."""
 
-    def __init__(self, label, deny=(), home=None):
+    def __init__(self, label, deny=(), home=None, key=None):
         self.label, self.deny = label, deny
         self.events, self.asks, self.seen = [], [], 0
         self.slow = {}      # keyword -> seconds that the person waits before the answer
         self.agent = True   # the answer of the Claude agent to a request of a saved contact; None is no answer
-        self.pl = PeerLink(self._emit, ask=self.ask, session=label, **({"home": home} if home else {}))
+        self.pl = PeerLink(self._emit, ask=self.ask, session=label, secret_key=key, **({"home": home} if home else {}))
         SIDES.append(self)
 
     def _emit(self, event):
@@ -108,6 +108,13 @@ class SlowDial:
     async def connect(self, addr, alpn):
         await asyncio.sleep(self._seconds)
         return await self._ep.connect(addr, alpn)
+
+
+def ordered_keys():
+    """Two secret keys: the public key of the first is higher than the public key of the second."""
+    import iroh
+    keys = [secrets.token_bytes(32) for _ in range(2)]
+    return sorted(keys, key=lambda k: bytes(iroh.SecretKey.from_bytes(k).public().to_bytes()), reverse=True)
 
 
 async def up(*sides):
@@ -402,34 +409,44 @@ async def test_ctl():
 
 
 async def test_no_link_outside_the_table():
-    """Review C1: a slow dial and an inbound request for one name. Each link must stay under a lease."""
-    peerlink.LEASE_S, peerlink.WARN_S = 4.0, 0.5
-    a, b = await linked()
-    await a.wait("closed", 8)
-    await b.wait("closed", 8)
-    a.pl.ep = SlowDial(a.pl.ep, 3.0)
-    dial = asyncio.ensure_future(a.pl.connect("Bob"))   # Alice asks; her dial is slow
-    await asyncio.sleep(0.3)
-    await b.pl.connect("Alice")                         # Bob asks at the same time; Alice accepts
-    await a.wait("open", 10)
-    await b.wait("open", 10)
-    t_open, inbound, b_link = time.monotonic(), a.pl.links["bob"], b.pl.links["alice"]
-    b_link.expires = b_link.expires_wall = float("inf")   # a hostile peer does not obey its own timer
-    b.agent = False   # the agent of Bob refuses the late dial of Alice
-    try:
-        await dial
-    except PeerError:
-        pass
-    else:
-        raise AssertionError("the late dial made a second link for the same name")
-    assert a.pl.links.get("bob") is inbound and inbound.state == "open"
-    await a.wait("closed", 8)                           # the lease of Alice still ends the link
-    assert time.monotonic() - t_open < 6.0 and a.pl.status() == []
-    try:
-        await b.pl._write(b_link, {"t": "msg", "text": "text after the lease end"})
-    except Exception:
-        pass
-    await a.absent("msg", 1.5)
+    """Review C1: a slow dial and an inbound request for one name. One link stays, and it is under a lease."""
+    for alice_high in (True, False):
+        peerlink.LEASE_S, peerlink.WARN_S = 4.0, 0.5
+        keys = ordered_keys()
+        a, b = Side("alice", key=keys[0 if alice_high else 1]), Side("bob", key=keys[1 if alice_high else 0])
+        await up(a, b)
+        await b.pl.connect("Alice", await a.pl.invite("Bob"))
+        await a.wait("open")
+        await b.wait("open")
+        await a.wait("closed", 8)
+        await b.wait("closed", 8)
+        real = a.pl.ep
+        a.pl.ep = SlowDial(real, 3.0)
+        dial = asyncio.ensure_future(a.pl.connect("Bob"))   # Alice asks; her dial is slow
+        await asyncio.sleep(0.3)
+        await b.pl.connect("Alice")                         # Bob asks at the same time; the agent of Alice accepts
+        await a.wait("open", 10)
+        await b.wait("open", 10)
+        await asyncio.gather(dial, return_exceptions=True)
+        a.pl.ep = real
+        await asyncio.sleep(1.0)
+        assert len(a.pl.links) == 1 and len(b.pl.links) == 1, (alice_high, a.pl.status(), b.pl.status())
+        for link in b.pl.links.values():                    # a hostile peer does not obey its own timer
+            link.expires = link.expires_wall = float("inf")
+        for _ in range(240):                                # the lease of Alice still ends her link
+            if not a.pl.links:
+                break
+            await asyncio.sleep(0.05)
+        assert a.pl.status() == [], (alice_high, a.pl.status())
+        a.seen = len(a.events)
+        for link in list(b.pl.links.values()):
+            try:
+                await b.pl._write(link, {"t": "msg", "text": "text after the lease end"})
+            except Exception:
+                pass
+        await a.absent("msg", 1.5)
+        await a.pl.close()
+        await b.pl.close()
 
 
 async def test_late_renewed():
@@ -587,26 +604,49 @@ async def test_forget():
 
 
 async def test_two_requests_at_the_same_time():
-    """Review 2, item 1: the two persons type /peer connect at the same time. One link stays open."""
-    for gap in (0.0, 0.3):
-        peerlink.LEASE_S, peerlink.WARN_S = 2.0, 0.5
-        a, b = await linked()
-        await a.wait("closed", 8)
-        await b.wait("closed", 8)
-        peerlink.LEASE_S = 60.0
-        first = asyncio.ensure_future(a.pl.connect("Bob"))
-        await asyncio.sleep(gap)
-        second = asyncio.ensure_future(b.pl.connect("Alice"))
-        await asyncio.gather(first, second, return_exceptions=True)
-        await a.wait("open", 20)
-        await b.wait("open", 20)
-        await asyncio.sleep(3.0)
-        states = [x["state"] for x in a.pl.status() + b.pl.status()]
-        assert states == ["open", "open"], (gap, states, a.events[-4:], b.events[-4:])
-        await b.pl.send("Alice", "still here")
-        assert (await a.wait("msg", 5))["text"] == "still here"
-        await a.pl.close()
-        await b.pl.close()
+    """The two persons type /peer connect at the same time. One link stays open, for each order of the events.
+
+    The side "high" has the higher public key. A slow dial makes the request of that side arrive late."""
+    peerlink.REQ_PER_HOUR = 100   # this test makes many requests with one pair; the rate limit has its own test
+    high_key, low_key = ordered_keys()
+    high, low = Side("high", key=high_key), Side("low", key=low_key)
+    await up(high, low)
+    await low.pl.connect("High", await high.pl.invite("Low"))   # the pairing
+    await high.wait("open")
+    await low.wait("open")
+    # (the side that asks first, seconds before the second side asks, the side with a slow dial)
+    for first, gap, slow in ((high, 0.0, None), (low, 0.0, None), (high, 0.3, None), (low, 0.3, None),
+                             (high, 0.0, high), (high, 0.0, low), (low, 0.0, high), (low, 0.0, low)):
+        case = (first.label, gap, slow.label if slow else None)
+        await high.pl.end("Low")
+        for _ in range(100):
+            if not high.pl.links and not low.pl.links:
+                break
+            await asyncio.sleep(0.05)
+        assert not high.pl.links and not low.pl.links, case
+        second = low if first is high else high
+        real = slow.pl.ep if slow else None
+        if slow:
+            slow.pl.ep = SlowDial(real, 1.0)
+        try:
+            one = asyncio.ensure_future(first.pl.connect("Low" if first is high else "High"))
+            await asyncio.sleep(gap)
+            two = asyncio.ensure_future(second.pl.connect("Low" if second is high else "High"))
+            await asyncio.gather(one, two, return_exceptions=True)
+            stable = 0.0   # the two sides must show one open link for 2 seconds without a break
+            for _ in range(300):
+                states = [x["state"] for x in high.pl.status() + low.pl.status()]
+                stable = stable + 0.05 if states == ["open", "open"] else 0.0
+                if stable >= 2.0:
+                    break
+                await asyncio.sleep(0.05)
+            assert stable >= 2.0, (case, states, high.events[-5:], low.events[-5:])
+            high.seen, low.seen = len(high.events), len(low.events)
+            await low.pl.send("High", f"still here {case}")
+            assert (await high.wait("msg", 5))["text"].startswith("still here"), case
+        finally:
+            if slow:
+                slow.pl.ep = real
 
 
 async def test_forget_removes_each_name_of_the_key():

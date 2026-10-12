@@ -120,7 +120,7 @@ The agent can answer only a request that waits, and only a request of a saved co
 
 Alice's session must have a helper that runs: she typed `/peer listen`, or a different `/peer` command, in that session.
 A key that is not in the contacts and has no valid ticket gets no popup.
-If the two persons ask at the same time, the request of the side with the higher key is used, so that one link opens.
+If the two persons ask at the same time, the two helpers use one rule: the connection that the side with the higher key dialed is the one that stays. The side with the lower key takes that connection with no second decision, because its person asked for the link. Thus one link opens for each order of the events.
 If a ticket changes the key of a saved contact, the dialog says so on each side.
 
 The code is four digits from a hash of the two public keys. The two persons can compare it by voice.

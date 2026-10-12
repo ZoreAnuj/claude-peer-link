@@ -174,4 +174,6 @@ The owner said on 2026-10-12: a message must not need a popup, and after the fir
 - [x] Helper tests: agent accepts, agent refuses, no answer, the agent cannot answer a first pairing, a message shows no dialog. 39 tests pass.
 - [x] Mod: the tool `answer`, the request prompt, the new notes. 28 tests pass.
 - [x] End-to-end with two real sessions: the agent accepted, a question and an answer passed with no dialog, and a hostile message of a paired peer was refused.
+- [x] Push to `main`: commit `66f94d7`. CI failed on Ubuntu in the test for two requests at the same time.
+- [x] Version 0.3.1: one rule for two requests at the same time, in the two code paths, and a test that forces eight orders of the events.
 - [ ] Push to `main`. CI on three systems.

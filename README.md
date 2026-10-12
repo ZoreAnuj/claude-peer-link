@@ -3,7 +3,7 @@
 A Claude Code plugin that links one session to a Claude Code session of a different person, through the internet.
 Two persons pair their systems one time, each in a desktop popup. After that, the Claude agents accept or refuse a link and exchange messages with no popup. A link ends after 60 minutes.
 
-Status: version 0.3.0. The tests pass. A trial with a second person is not done yet.
+Status: version 0.3.1. The tests pass. A trial with a second person is not done yet.
 
 ## How it works
 
