@@ -62,7 +62,8 @@ GitHub Actions run 38289130543, commit `97c2534`, for version 0.1.0. The run for
 | Cross-network: the laptop dials the runner, one message each way | Pass, 0.2 s | Pass, 0.3 s | Pass, 0.3 s |
 | Route of the cross-network link | Relay | Relay | Relay |
 
-Version 0.2.1 has 35 helper tests and 23 mod tests.
+Version 0.2.2 has 36 helper tests and 23 mod tests.
+A report from a Windows machine of a second person, 2026-10-12: the plugin installed, and the consent window showed from Git Bash. The test command in Windows PowerShell 5.1 failed on a byte-order mark; version 0.2.2 accepts it.
 The mod tests and the end-to-end test ran on Linux only. The mod was not run on macOS or Windows.
 
 Up: [repository README](../README.md)

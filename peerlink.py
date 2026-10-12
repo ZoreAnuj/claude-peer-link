@@ -84,7 +84,7 @@ def dialog_main():
     """Show one consent dialog. Exit code 0 and the word "accept" only if the person presses the accept button.
 
     Exit code 1 is a deny or no answer. Exit code 2 means that no dialog is possible."""
-    spec = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    spec = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))   # Windows PowerShell 5.1 pipes a byte-order mark first
     accepted = []
     try:
         import tkinter as tk
@@ -932,7 +932,7 @@ async def serve(label):
 
 def ctl_main():
     """One request to a running helper."""
-    msg = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    msg = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
     try:
         with multiprocessing.connection.Client(msg["ctl"], family=CTL_FAMILY, authkey=bytes.fromhex(msg["key"])) as conn:
             conn.send_bytes(json.dumps(msg["req"]).encode())

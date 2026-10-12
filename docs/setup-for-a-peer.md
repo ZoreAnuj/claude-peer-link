@@ -25,7 +25,14 @@ claude plugin install peer-link --marketplace ZoreAnuj/claude-peer-link --scope 
 claude plugin details peer-link
 ```
 
-The second command must show version 0.2.1 or later.
+The second command must show version 0.2.2 or later.
+
+If an older version is installed, update it:
+
+```
+claude plugin marketplace update zoreanuj-peer-link
+claude plugin update peer-link@zoreanuj-peer-link
+```
 
 A plugin of this type runs with the permissions of your person. To see what it does before you install it, clone the repository and run `claude plugin validate <directory>`.
 
@@ -58,6 +65,7 @@ On Windows PowerShell:
 
 The correct result is the word `accept`. Ask your person if a sound played.
 If no window shows, each consent on this machine will be a refusal, and the link cannot work.
+If the window shows and nobody presses a button, it closes after 30 seconds with exit code 1. That shows that the window works, but the test is complete only when your person presses Accept.
 
 ## 5. Steps that only your person can do
 

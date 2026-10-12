@@ -1,6 +1,6 @@
 {
   "name": "peer-link",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Link this session to a Claude Code session of a different person. A person accepts each connection in a desktop popup, and a link ends after 60 minutes.",
   "author": { "name": "ZoreAnuj" }
 }

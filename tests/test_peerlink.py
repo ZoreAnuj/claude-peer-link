@@ -695,6 +695,23 @@ async def test_helper_stops_with_its_reader():
             serve.kill()
 
 
+async def test_dialog_input_with_a_byte_order_mark():
+    """Windows PowerShell 5.1 puts a byte-order mark before text that it pipes to a program."""
+    env = dict(os.environ)
+    if sys.platform.startswith("linux"):
+        env.pop("DISPLAY", None)       # no window: the child stops after it read its input
+        env.pop("WAYLAND_DISPLAY", None)
+    elif os.environ.get("PEERLINK_TEST_DIALOG") != "1":
+        return "skipped (set PEERLINK_TEST_DIALOG=1; a window shows for one second)"
+    spec = json.dumps({"title": "Peer link test", "text": "Test window. It closes in 1 second.", "timeout": 1, "yes": "Accept", "sound": False})
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, os.path.join(ROOT, "peerlink.py"), "--dialog",
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    _, err = await asyncio.wait_for(proc.communicate(b"\xef\xbb\xbf" + spec.encode()), 30)
+    assert b"Traceback" not in err, err.decode(errors="replace")[-300:]
+    assert proc.returncode in (1, 2), proc.returncode   # a deny at the timeout, or no display
+
+
 async def test_dialog():
     if os.environ.get("PEERLINK_TEST_DIALOG") != "1":
         return "skipped (set PEERLINK_TEST_DIALOG=1)"
