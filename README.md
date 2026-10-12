@@ -39,7 +39,9 @@ Or from a clone, for one session:
 claude --plugin-dir /path/to/claude-peer-link
 ```
 
-The plugin makes no process and no network connection before the first `/peer invite` or `/peer connect`.
+The plugin makes no process and no network connection before the first `/peer invite`, `/peer connect` or `/peer listen`.
+
+For the other person, send [docs/setup-for-a-peer.md](docs/setup-for-a-peer.md). It is written for their Claude Code agent.
 
 ## Commands
 
