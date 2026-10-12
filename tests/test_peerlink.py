@@ -13,13 +13,17 @@ The consent dialog is replaced here, in the test process only.
 PEERLINK_TEST_DIALOG=1 also shows the real dialog for two seconds.
 """
 import asyncio
+import json
 import os
 import secrets
+import stat
+import subprocess
 import sys
 import time
 import traceback
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, ROOT)
 import peerlink  # noqa: E402
 from peerlink import PeerError, PeerLink  # noqa: E402
 
@@ -299,6 +303,38 @@ async def test_end():
     assert "ended" in (await b.wait("closed", 10))["reason"]
     assert a.pl.status() == []
     assert await raises(a.pl.end, "Bob")
+
+
+async def test_ctl():
+    """A request with the key gets an answer. A request with a wrong key gets none. The helper stops with its reader."""
+    helper = os.path.join(ROOT, "peerlink.py")
+    serve = subprocess.Popen([sys.executable, helper, "serve", "ctl test"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    try:
+        ready = json.loads(await asyncio.wait_for(asyncio.to_thread(serve.stdout.readline), 30))
+        assert ready["ev"] == "ready" and len(ready["key"]) == 64, ready
+        if os.name == "posix":
+            assert stat.S_IMODE(os.stat(os.path.dirname(ready["ctl"])).st_mode) == 0o700
+
+        async def ctl(key, req):
+            proc = await asyncio.create_subprocess_exec(sys.executable, helper, "ctl", stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(json.dumps({"ctl": ready["ctl"], "key": key, "req": req}).encode()), 30)
+            return proc.returncode, json.loads(out)
+
+        assert await ctl(ready["key"], {"op": "status"}) == (0, {"ok": True, "result": []})
+        code, answer = await ctl(ready["key"], {"op": "end", "name": "Nobody"})
+        assert code == 0 and answer["ok"] is False and "no link" in answer["error"], answer
+        assert (await ctl(ready["key"], {"op": "explode"}))[1]["ok"] is False
+        assert (await ctl(ready["key"], {"op": "send", "name": None, "text": 5}))[1]["ok"] is False
+        code, answer = await ctl("00" * 32, {"op": "status"})
+        assert code == 1 and answer["ok"] is False, (code, answer)
+        assert (await ctl(ready["key"], {"op": "status"}))[1]["ok"] is True, "the helper stopped after a wrong key"
+        serve.stdout.close()   # the mod is gone: the helper must stop at its next output line
+        assert await asyncio.wait_for(asyncio.to_thread(serve.wait), 20) == 0
+        if os.name == "posix":
+            assert not os.path.exists(os.path.dirname(ready["ctl"])), "the socket directory stayed"
+    finally:
+        if serve.poll() is None:
+            serve.kill()
 
 
 async def test_dialog():

@@ -5,7 +5,9 @@
 # ///
 """Peer link helper: transport, tickets, leases, limits and consent dialogs.
 
-  peerlink.py --dialog   the consent dialog, a child of the helper: JSON on standard input
+  peerlink.py serve [label]   started by the mod: events on standard output, requests on a control socket
+  peerlink.py ctl             one request to a running helper: JSON on standard input, JSON on standard output
+  peerlink.py --dialog        the consent dialog, a child of the helper: JSON on standard input
 
 Design: docs/2026-10-12-peer-link-design.md
 """
@@ -14,12 +16,16 @@ import base64
 import binascii
 import hashlib
 import json
+import multiprocessing.connection
 import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import unicodedata
 from collections import deque
@@ -37,6 +43,7 @@ MAX_FRAME = 65536
 RATE_PER_MIN = 30        # inbound messages for each link
 REQ_PER_HOUR = 3         # requests without a ticket, and renewal requests, for each peer
 MAX_LINKS = 4
+HEARTBEAT_S = 10.0       # the helper stops when it cannot write this line to the mod
 TITLE = "Peer link"
 
 
@@ -613,7 +620,117 @@ class PeerLink:
             pass
 
 
+# ---------------------------------------------------------------- control socket and helper process
+
+CTL_FAMILY = "AF_PIPE" if sys.platform == "win32" else "AF_UNIX"
+
+
+def _ctl_address():
+    """A new address for this user only: a pipe name on Windows, or a socket in a new directory with mode 0700."""
+    if sys.platform == "win32":
+        return r"\\.\pipe\peerlink-%d-%s" % (os.getpid(), secrets.token_hex(8))
+    return os.path.join(tempfile.mkdtemp(prefix="peerlink-", dir=os.environ.get("XDG_RUNTIME_DIR")), "ctl.sock")
+
+
+async def _dispatch(pl, req):
+    try:
+        op = req.get("op")
+        if op == "invite":
+            result = await pl.invite(req.get("name"))
+        elif op == "connect":
+            result = await pl.connect(req.get("name"), req.get("ticket"))
+        elif op == "send":
+            result = await pl.send(req.get("name"), req.get("text"))
+        elif op == "end":
+            result = await pl.end(req.get("name"))
+        elif op == "status":
+            result = pl.status()
+        else:
+            raise PeerError("unknown request")
+        return {"ok": True, "result": result}
+    except PeerError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"helper error: {type(e).__name__}"}
+
+
+def _ctl_serve(listener, loop, pl):
+    """Thread: one short connection for each request. The listener proves the key before a request is read."""
+    def handle(conn):
+        try:
+            req = json.loads(conn.recv_bytes(4 * MAX_FRAME))
+            coro = _dispatch(pl, req if isinstance(req, dict) else {})
+            conn.send_bytes(json.dumps(asyncio.run_coroutine_threadsafe(coro, loop).result()).encode())
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    while not loop.is_closed():
+        try:
+            conn = listener.accept()
+        except Exception:   # a wrong key, a client that left, or a closed listener
+            time.sleep(0.05)
+            continue
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+
+async def serve(label):
+    """The helper process. It lives as long as the mod reads its output."""
+    loop, stop, out = asyncio.get_running_loop(), asyncio.Event(), sys.stdout.buffer
+
+    def emit(event):
+        try:
+            out.write(json.dumps(event).encode() + b"\n")
+            out.flush()
+        except (OSError, ValueError):   # the mod is gone
+            stop.set()
+            try:   # a second write error at interpreter exit would change the exit code
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            except (OSError, ValueError):
+                pass
+
+    audit = os.path.join(os.path.expanduser("~"), ".claude", "peer-link", "audit.log")
+    pl = PeerLink(emit, session=label, audit_path=audit)
+    key, address = secrets.token_bytes(32), _ctl_address()
+    listener = multiprocessing.connection.Listener(address, family=CTL_FAMILY, authkey=key)
+    threading.Thread(target=_ctl_serve, args=(listener, loop, pl), daemon=True).start()
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGTERM, stop.set)   # close the links with a last message
+    emit({"ev": "ready", "ctl": address, "key": key.hex()})
+    try:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), HEARTBEAT_S)
+            except asyncio.TimeoutError:
+                emit({"ev": "hb"})
+    finally:
+        await pl.close()
+        listener.close()
+        if sys.platform != "win32":
+            shutil.rmtree(os.path.dirname(address), ignore_errors=True)
+    return 0
+
+
+def ctl_main():
+    """One request to a running helper."""
+    msg = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    try:
+        with multiprocessing.connection.Client(msg["ctl"], family=CTL_FAMILY, authkey=bytes.fromhex(msg["key"])) as conn:
+            conn.send_bytes(json.dumps(msg["req"]).encode())
+            answer, code = conn.recv_bytes(), 0
+    except Exception as e:   # a wrong key, or no helper at this address
+        answer, code = json.dumps({"ok": False, "error": f"no answer from the helper ({type(e).__name__})"}).encode(), 1
+    sys.stdout.buffer.write(answer + b"\n")
+    return code
+
+
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--dialog"]:
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if mode == "--dialog":
         sys.exit(dialog_main())
-    sys.exit(f"usage: {os.path.basename(__file__)} --dialog")
+    if mode == "ctl":
+        sys.exit(ctl_main())
+    if mode == "serve":
+        sys.exit(asyncio.run(serve(" ".join(sys.argv[2:]))))
+    sys.exit(f"usage: {os.path.basename(__file__)} serve [label] | ctl | --dialog")
