@@ -5,5 +5,6 @@ Design documents for the peer link.
 | File | Content |
 |---|---|
 | `2026-10-12-peer-link-design.md` | Written spec: decisions, feasibility results, design, security rules, tests. |
+| `2026-10-12-peer-link-plan.md` | Implementation plan: tasks, interfaces, test commands. |
 
 Up: [repository README](../README.md)
