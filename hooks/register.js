@@ -6,7 +6,7 @@
 // The mod has no network code and gives no consent: the helper (peerlink.py) shows all dialogs.
 // Design: docs/2026-10-12-peer-link-design.md
 
-const LONG_MS = 6 * 60 * 1000 // a request that waits for a person in a dialog
+const LONG_MS = 7 * 60 * 1000 // a request that waits for a person in a dialog (5 minutes) and for a dial
 const USAGE = 'use /peer invite <name> | /peer connect <name> [ticket] | /peer end <name> | /peer status'
 
 let helper = null // { ctl, key } while the helper runs
@@ -25,14 +25,20 @@ function startHelper($) {
       let problem = 'the helper stopped'
       try {
         const label = (await $.session.cwd()).split(/[\\/]/).filter(Boolean).pop() ?? ''
-        let buffer = ''
+        const buffers = { stdout: '', stderr: '' }
+        $.ui.log('the helper starts. The first start can take a minute.')
         for await (const { stream, text } of $.process.spawn({ argv: uv($, 'serve', label) })) {
-          if (stream !== 'stdout') continue
-          buffer += text
-          for (let end; (end = buffer.indexOf('\n')) >= 0; buffer = buffer.slice(end + 1)) {
+          buffers[stream] += text
+          for (let end; (end = buffers[stream].indexOf('\n')) >= 0; buffers[stream] = buffers[stream].slice(end + 1)) {
+            const line = buffers[stream].slice(0, end)
+            if (stream === 'stderr') {
+              // the helper marks its notes for the person; other lines are from uv
+              if (line.startsWith('peerlink:')) $.ui.log(line.slice(9).trim())
+              continue
+            }
             let event
             try {
-              event = JSON.parse(buffer.slice(0, end))
+              event = JSON.parse(line)
             } catch {
               continue
             }

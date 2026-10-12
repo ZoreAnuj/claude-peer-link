@@ -17,7 +17,8 @@ type Fake = {
   stop: () => void                    // the helper process ends
 }
 
-// Register the stubs. `lines` are the helper output lines. `answer` gives the ctl result for each request.
+// Register the stubs. `lines` are the helper output lines; a line that starts with "stderr:" goes to the error stream.
+// `answer` gives the ctl result for each request.
 function fake(on, lines: string[], answer: (req) => object = () => ({ ok: true, result: 'done' })): Fake {
   let stop = () => {}
   const stopped = new Promise<void>(resolve => { stop = resolve })
@@ -30,7 +31,10 @@ function fake(on, lines: string[], answer: (req) => object = () => ({ ok: true, 
   on('ui.copy', ($, e) => { f.copied.push(e.text); return { value: { isCopied: true } } })
   on('process.spawn', async function* ($, e) {
     f.spawns.push([...e.argv])
-    for (const line of lines) yield { stream: 'stdout', text: line + '\n' }
+    for (const line of lines) {
+      if (line.startsWith('stderr:')) yield { stream: 'stderr', text: line.slice(7) + '\n' }
+      else yield { stream: 'stdout', text: line + '\n' }
+    }
     await stopped
     return { value: { code: 0, signal: null } }
   })
@@ -170,4 +174,14 @@ test('helper error: a failed request is a dim line, not text for Claude', async 
   const answer = await peer($, 'connect Alice nonsense')
   expect(answer.text).toBeUndefined()
   expect(f.logs.join('\n')).toMatch(/this is not a valid ticket/)
+})
+
+test('helper notes: an error line of the helper with the peerlink mark reaches the person, other lines do not', async ($, on) => {
+  const f = fake(on, ['stderr:Installed 1 package in 4ms', 'stderr:peerlink: no consent dialog is possible on this machine', READY])
+  await peer($, 'invite Bob')
+  await tick()
+  const shown = f.logs.join('\n')
+  expect(shown).toMatch(/no consent dialog is possible/)
+  expect(shown).not.toMatch(/Installed 1 package/)
+  expect(shown).toMatch(/The first start can take a minute/)
 })

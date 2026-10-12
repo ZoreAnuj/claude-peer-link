@@ -14,8 +14,9 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import peerlink  # noqa: E402  (cross_accept puts the repository on the path)
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(HERE, "..")]
+import peerlink  # noqa: E402
 from cross_accept import accept, derive, route  # noqa: E402
 
 WAIT_S = 540

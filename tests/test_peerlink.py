@@ -13,6 +13,8 @@ The consent dialog is replaced here, in the test process only.
 PEERLINK_TEST_DIALOG=1 also shows the real dialog for two seconds.
 """
 import asyncio
+import contextlib
+import io
 import json
 import os
 import secrets
@@ -352,9 +354,11 @@ async def test_no_display():
         return "skipped (Linux only)"
     saved = {k: os.environ.pop(k) for k in ("DISPLAY", "WAYLAND_DISPLAY") if k in os.environ}
     try:
-        t0 = time.monotonic()
-        assert await peerlink.ask("Peer link test", "No display.", timeout=5.0) is False
+        t0, said = time.monotonic(), io.StringIO()
+        with contextlib.redirect_stderr(said):
+            assert await peerlink.ask("Peer link test", "No display.", timeout=5.0) is False
         assert time.monotonic() - t0 < 4.5, "a consent without a display did not fail fast"
+        assert said.getvalue().startswith("peerlink: no consent dialog is possible"), said.getvalue()
     finally:
         os.environ.update(saved)
 

@@ -28,11 +28,11 @@ jobs:
         if: runner.os != 'Linux'
         run: uv run --managed-python --script tests/test_peerlink.py
 
-  # Cross-network test: only for a commit message with [cross].
+  # Cross-network test: only for a commit message that starts with [cross].
   # The runner waits for a dial from the laptop: tests/cross_dial.py <run id>
   cross:
     name: cross-network (${{ matrix.os }})
-    if: contains(github.event.head_commit.message, '[cross]')
+    if: startsWith(github.event.head_commit.message, '[cross]')
     strategy:
       fail-fast: false
       matrix:

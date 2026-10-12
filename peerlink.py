@@ -79,11 +79,16 @@ def _sound(root):
 
 
 def dialog_main():
-    """Show one consent dialog. Exit code 0 and the word "accept" only if the person presses the accept button."""
-    import tkinter as tk
+    """Show one consent dialog. Exit code 0 and the word "accept" only if the person presses the accept button.
+
+    Exit code 1 is a deny or no answer. Exit code 2 means that no dialog is possible."""
     spec = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     accepted = []
-    root = tk.Tk()
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:
+        return 2   # no display, or Python without Tk
     root.title(spec["title"])
     root.resizable(False, False)
     root.attributes("-topmost", True)
@@ -135,6 +140,9 @@ async def ask(title, text, body="", sound=False, yes="Accept", timeout=None):
             sys.executable, "-I", os.path.abspath(__file__), "--dialog",
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **flags)
         out, _ = await asyncio.wait_for(proc.communicate(spec.encode()), timeout + 15)
+        if proc.returncode == 2:   # the mod shows lines with this mark to the person
+            print("peerlink: no consent dialog is possible on this machine (no display, or Python without Tk). "
+                  "Each consent is a deny.", file=sys.stderr, flush=True)
         return proc.returncode == 0 and out.strip() == b"accept"
     except Exception:
         return False

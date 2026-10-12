@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["iroh==1.1.0"]
 # ///
-"""Cross-network test, runner side. A commit message with [cross] starts it on a GitHub runner.
+"""Cross-network test, runner side. A commit message that starts with [cross] starts it on a GitHub runner.
 
 The key and the ticket secret come from PEERLINK_CROSS_ID, so that the laptop can dial without a
 message from the runner. This is for the test only: the run id is not a secret.

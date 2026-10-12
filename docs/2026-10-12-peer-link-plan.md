@@ -116,7 +116,7 @@ Hooks: `session.start` (registers `/peer`), `command.run` for `peer`, `session.s
 
 - [ ] The workflow runs the helper tests on `ubuntu-latest`, `macos-latest` and `windows-latest`, with the real dialog (`xvfb-run` on Linux). Actions are pinned to commit hashes.
 - [ ] Push. Pass: three green jobs.
-- [ ] A commit message with `[cross]` also starts `tests/cross_accept.py` on each runner. The laptop runs `tests/cross_dial.py <run id>`. Pass: a link opens to each runner, one message goes each way, and the path is the relay.
+- [ ] A commit message that starts with `[cross]` also starts `tests/cross_accept.py` on each runner. The laptop runs `tests/cross_dial.py <run id>`. Pass: a link opens to each runner, one message goes each way, and the path is the relay.
 - [ ] Record the result in `tests/README.md`. Commit.
 
 ### Task 6: Documents and pull request
