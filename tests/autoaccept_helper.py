@@ -11,7 +11,9 @@ temporary directory with this file as `peerlink.py` and the real helper as `peer
     cp -r .claude-plugin hooks "$COPY"/
     cp peerlink.py "$COPY"/peerlink_real.py
     cp tests/autoaccept_helper.py "$COPY"/peerlink.py
-    claude --plugin-dir "$COPY"
+    PEERLINK_HOME="$COPY"/home-alice claude --plugin-dir "$COPY"
+
+Give each test session its own PEERLINK_HOME, so that the test does not use the identity of the person.
 """
 import asyncio
 import os
@@ -27,7 +29,6 @@ async def accept(*args, **kwargs):
 
 class AutoAccept(real.PeerLink):
     def __init__(self, emit, **kwargs):
-        kwargs["audit_path"] = None
         super().__init__(emit, ask=accept, **kwargs)
 
 

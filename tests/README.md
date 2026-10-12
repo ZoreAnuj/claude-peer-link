@@ -40,9 +40,19 @@ Two real Claude Code 2.1.296 sessions ran on one Linux machine, each with the te
 
 In the same test, the auto mode of the sending session refused to send the hostile text for its own user.
 
+## End-to-end result for saved contacts, 2026-10-12
+
+Two real sessions ran with the test copy of version 0.2.0, each with its own `PEERLINK_HOME`.
+
+| Step | Result |
+|---|---|
+| `/peer invite Bob`, then `/peer connect Alice <ticket>` | The link opened. Each side saved `identity.key` and `contacts.json` with mode 0600. |
+| `/peer end Alice`, then `/peer connect Alice` with no ticket | The link opened again. |
+| The second session ended. A new session started with the same `PEERLINK_HOME`. `/peer connect Alice` with no ticket | The link opened. `/peer status` showed the saved contact. |
+
 ## Three systems and two networks, 2026-10-12
 
-GitHub Actions run 38289130543, commit `97c2534`.
+GitHub Actions run 38289130543, commit `97c2534`, for version 0.1.0. The run for version 0.2.0 is the newest run on `main`.
 
 | Test | Ubuntu x86-64 | macOS ARM64 | Windows x86-64 |
 |---|---|---|---|

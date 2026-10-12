@@ -125,3 +125,30 @@ Hooks: `session.start` (registers `/peer`), `command.run` for `peer`, `session.s
 
 - [ ] `README.md`: what it is, install, use, security rules, limits, test commands.
 - [ ] Push to `main`. The owner said on 2026-10-12: no branch and no pull request are necessary.
+
+### Task 7: Review fixes and saved contacts (version 0.2.0)
+
+Added on 2026-10-12, after the code review and the owner's request for a later request with no ticket.
+
+**Files:** Modify `peerlink.py`, `hooks/register.js`, the two test files, the spec, the README files.
+
+**Interfaces (changes):**
+
+```python
+def make_ticket(endpoint_id: str, secret: str) -> str        # "peer2." + base64url, no relay
+def parse_ticket(ticket: str) -> tuple[str, str]
+class PeerLink:
+    def __init__(self, emit, ask=ask, session="", secret_key=None, relay_urls=None, home=None)
+    async def listen(self) -> str
+    async def forget(self, name) -> str
+    def contact_names(self) -> list[str]
+```
+
+Requests: `{"op":"listen"}`, `{"op":"forget","name"}`. `status` answers `{"links": [...], "contacts": [...]}`.
+
+- [x] A failing test for each review finding: one link for each name, renewal time, one pending request, loopback only, silent control client, dialog time, no text after the end.
+- [x] Failing tests for saved contacts: no ticket after a restart, one helper for each identity, forget.
+- [x] The fixes and the feature in `peerlink.py`. 28 helper tests pass.
+- [x] Mod: `listen`, `forget`, the new `status`, no helper start for `end`, `forget` and `status`, text only for open links, empty `PYTHONPATH`. 19 mod tests pass.
+- [x] End-to-end with two real sessions: first link with a ticket, second request with no ticket, the same after a restart.
+- [ ] Push to `main`. CI on three systems and the cross-network test.

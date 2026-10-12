@@ -18,9 +18,12 @@ import io
 import json
 import os
 import secrets
+import shutil
+import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
@@ -30,21 +33,22 @@ import peerlink  # noqa: E402
 from peerlink import PeerError, PeerLink  # noqa: E402
 
 SIDES = []
+HOMES = []
 KNOBS = ("LEASE_S", "TICKET_S", "PENDING_S", "PENDING_GRACE_S", "WARN_S", "RATE_PER_MIN", "REQ_PER_HOUR")
 
 
 class Side:
     """One helper with a recorded, scripted consent function and an event list."""
 
-    def __init__(self, label, deny=()):
+    def __init__(self, label, deny=(), home=None):
         self.label, self.deny = label, deny
         self.events, self.asks, self.seen = [], [], 0
         self.slow = {}  # keyword -> seconds to wait before the answer
-        self.pl = PeerLink(self.events.append, ask=self.ask, session=label)
+        self.pl = PeerLink(self.events.append, ask=self.ask, session=label, **({"home": home} if home else {}))
         SIDES.append(self)
 
     async def ask(self, title, text, body="", sound=False, yes="Accept", timeout=None):
-        self.asks.append({"text": text, "body": body, "sound": sound})
+        self.asks.append({"text": text, "body": body, "sound": sound, "timeout": timeout})
         for word, seconds in self.slow.items():
             if word in text:
                 await asyncio.sleep(seconds)
@@ -68,6 +72,26 @@ class Side:
         await asyncio.sleep(seconds)
         late = [e for e in self.events[self.seen:] if e["ev"] == ev]
         assert not late, f"{self.label}: unwanted '{ev}' event: {late}"
+
+
+def home():
+    """A new directory for the identity and the contacts of one helper. The runner removes it."""
+    HOMES.append(tempfile.mkdtemp(prefix="peerlink-test-"))
+    return HOMES[-1]
+
+
+class SlowDial:
+    """An endpoint whose dial is slow. A remote peer controls the time of a handshake."""
+
+    def __init__(self, ep, seconds):
+        self._ep, self._seconds = ep, seconds
+
+    def __getattr__(self, name):
+        return getattr(self._ep, name)
+
+    async def connect(self, addr, alpn):
+        await asyncio.sleep(self._seconds)
+        return await self._ep.connect(addr, alpn)
 
 
 async def up(*sides):
@@ -98,13 +122,18 @@ def raises(fn, *args):
 
 async def test_pure():
     assert peerlink.sanitize("a<b>\x00‮ c\n\td") == "a‹b› c\n\td"
+    # fullwidth brackets, line and paragraph separators, and the invisible selectors that can hide text
+    hidden = "x" + chr(0xFF1C) + "y" + chr(0xFF1E) + chr(0x2028) + "z" + chr(0x2029) + "w" + chr(0xE0101) + "!"
+    assert peerlink.sanitize(hidden) == "x" + chr(0x2039) + "y" + chr(0x203A) + "\nz\nw!", repr(peerlink.sanitize(hidden))
+    emoji = "ok " + chr(0x1F600) + chr(0xFE0F)
+    assert peerlink.sanitize(emoji) == emoji   # a normal emoji stays
     k1, k2 = secrets.token_bytes(32), secrets.token_bytes(32)
     code = peerlink.code_for(k1, k2)
     assert code == peerlink.code_for(k2, k1) and len(code) == 4 and code.isdigit()
-    eid, relay, sec = k1.hex(), "https://relay.example./", secrets.token_hex(16)
-    ticket = peerlink.make_ticket(eid, relay, sec)
-    assert ticket.startswith("peer1.") and peerlink.parse_ticket(ticket) == (eid, relay, sec)
-    for bad in ("", "garbage", "peer1.", "peer1.!!!", ticket[:30], "peer2." + ticket[6:]):
+    eid, sec = k1.hex(), secrets.token_hex(16)
+    ticket = peerlink.make_ticket(eid, sec)
+    assert ticket.startswith("peer2.") and peerlink.parse_ticket(ticket) == (eid, sec)
+    for bad in ("", "garbage", "peer2.", "peer2.!!!", ticket[:30], ticket + "AAAA", "peer1." + ticket[6:]):
         try:
             peerlink.parse_ticket(bad)
         except PeerError:
@@ -202,7 +231,8 @@ async def test_renewal():
     await b.pl.connect("Alice")  # no ticket and a live link: a renewal request
     assert (await a.wait("renewed", 5))["name"] == "Bob"
     assert (await b.wait("renewed", 5))["name"] == "Alice"
-    assert b.asked('Ask "Alice"') and a.asked("Renew the connection")[0]["sound"]
+    assert not b.asked('Ask "Alice"'), "a typed renewal request showed a local dialog"
+    assert a.asked("Renew the connection")[0]["sound"]
     await asyncio.sleep(max(0.0, 4.8 - (time.monotonic() - t0)))  # past the first lease end
     assert [x["state"] for x in a.pl.status() + b.pl.status()] == ["open", "open"]
     await a.wait("closed", 6)
@@ -267,12 +297,10 @@ async def test_ticket_expired():
 async def test_no_secret():
     a, b = Side("alice"), Side("bob")
     await up(a, b)
-    eid, relay, _ = peerlink.parse_ticket(await a.pl.invite("Bob"))
-    await b.pl.connect("Alice", peerlink.make_ticket(eid, relay, secrets.token_hex(16)))
+    eid, _ = peerlink.parse_ticket(await a.pl.invite("Bob"))
+    await b.pl.connect("Alice", peerlink.make_ticket(eid, secrets.token_hex(16)))
     await b.wait("denied", 15)
     assert not a.asked("Accept connection"), "a wrong secret made a popup"
-    other = peerlink.make_ticket(eid, "https://relay.example./", secrets.token_hex(16))
-    assert "relay" in await raises(Side("carol").pl.connect, "Alice", other)  # no dial to a relay that we do not know
 
 
 async def test_limits():
@@ -318,7 +346,8 @@ async def test_end():
 async def test_ctl():
     """A request with the key gets an answer. A request with a wrong key gets none. The helper stops with its reader."""
     helper = os.path.join(ROOT, "peerlink.py")
-    serve = subprocess.Popen([sys.executable, helper, "serve", "ctl test"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    env = dict(os.environ, PEERLINK_HOME=home())        # not the identity of the person who runs the tests
+    serve = subprocess.Popen([sys.executable, helper, "serve", "ctl test"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env)
     try:
         ready = json.loads(await asyncio.wait_for(asyncio.to_thread(serve.stdout.readline), 30))
         assert ready["ev"] == "ready" and len(ready["key"]) == 64, ready
@@ -330,7 +359,7 @@ async def test_ctl():
             out, _ = await asyncio.wait_for(proc.communicate(json.dumps({"ctl": ready["ctl"], "key": key, "req": req}).encode()), 30)
             return proc.returncode, json.loads(out)
 
-        assert await ctl(ready["key"], {"op": "status"}) == (0, {"ok": True, "result": []})
+        assert await ctl(ready["key"], {"op": "status"}) == (0, {"ok": True, "result": {"links": [], "contacts": []}})
         code, answer = await ctl(ready["key"], {"op": "end", "name": "Nobody"})
         assert code == 0 and answer["ok"] is False and "no link" in answer["error"], answer
         assert (await ctl(ready["key"], {"op": "explode"}))[1]["ok"] is False
@@ -338,6 +367,17 @@ async def test_ctl():
         code, answer = await ctl("00" * 32, {"op": "status"})
         assert code == 1 and answer["ok"] is False, (code, answer)
         assert (await ctl(ready["key"], {"op": "status"}))[1]["ok"] is True, "the helper stopped after a wrong key"
+        # Review I4: a client that connects and sends nothing must not stop the other requests
+        if os.name == "posix":
+            silent = socket.socket(socket.AF_UNIX)
+            silent.connect(ready["ctl"])
+        else:
+            silent = open(ready["ctl"], "r+b", buffering=0)
+        try:
+            await asyncio.sleep(0.5)
+            assert (await ctl(ready["key"], {"op": "status"}))[1]["ok"] is True
+        finally:
+            silent.close()
         serve.stdout.close()   # the mod is gone: the helper must stop at its next output line
         assert await asyncio.wait_for(asyncio.to_thread(serve.wait), 20) == 0
         if os.name == "posix":
@@ -345,6 +385,192 @@ async def test_ctl():
     finally:
         if serve.poll() is None:
             serve.kill()
+
+
+async def test_no_link_outside_the_table():
+    """Review C1: a slow dial and an inbound request for one name. Each link must stay under a lease."""
+    peerlink.LEASE_S, peerlink.WARN_S = 4.0, 0.5
+    a, b = await linked()
+    await a.wait("closed", 8)
+    await b.wait("closed", 8)
+    a.pl.ep = SlowDial(a.pl.ep, 3.0)
+    dial = asyncio.ensure_future(a.pl.connect("Bob"))   # Alice asks; her dial is slow
+    await asyncio.sleep(0.3)
+    await b.pl.connect("Alice")                         # Bob asks at the same time; Alice accepts
+    await a.wait("open", 10)
+    await b.wait("open", 10)
+    t_open, inbound, b_link = time.monotonic(), a.pl.links["bob"], b.pl.links["alice"]
+    b_link.expires = b_link.expires_wall = float("inf")   # a hostile peer does not obey its own timer
+    b.deny = ("Accept connection",)
+    try:
+        await dial
+    except PeerError:
+        pass
+    else:
+        raise AssertionError("the late dial made a second link for the same name")
+    assert a.pl.links.get("bob") is inbound and inbound.state == "open"
+    await a.wait("closed", 8)                           # the lease of Alice still ends the link
+    assert time.monotonic() - t_open < 6.0 and a.pl.status() == []
+    try:
+        await b.pl._write(b_link, {"t": "msg", "text": "text after the lease end"})
+    except Exception:
+        pass
+    await a.absent("msg", 1.5)
+
+
+async def test_late_renewed():
+    """Review I1: a renewal answer counts only for the time of one request."""
+    peerlink.LEASE_S, peerlink.WARN_S, peerlink.PENDING_S, peerlink.PENDING_GRACE_S = 6.0, 0.5, 1.0, 0.5
+    a, b = await linked()
+    t0, b_link = time.monotonic(), b.pl.links["alice"]
+    b.slow["Renew the connection"] = 60.0               # Bob never answers the request
+    b_link.expires = b_link.expires_wall = float("inf")
+    await a.pl.connect("Bob")                           # Alice asks for a renewal
+    await asyncio.sleep(5.0 - (time.monotonic() - t0))
+    await b.pl._write(b_link, {"t": "renewed"})         # the answer comes 5 s later, 1 s before the lease end
+    await a.wait("closed", 4)
+    assert time.monotonic() - t0 < 8.0, "a late answer extended the lease"
+    assert not [e for e in a.events if e["ev"] == "renewed"]
+
+
+async def test_renewal_always_gets_an_answer():
+    """Review I1: a renewal request above the rate gets a refusal, so that the asker can ask again later."""
+    peerlink.REQ_PER_HOUR = 0
+    a, b = await linked()
+    await b.pl.connect("Alice")
+    assert (await b.wait("renew_denied", 5))["name"] == "Alice"
+    assert not a.asked("Renew the connection")
+    await b.pl.connect("Alice")                         # not "a renewal request waits"
+    await b.wait("renew_denied", 5)
+
+
+async def test_one_pending_request():
+    """Review I2: a known peer that dials again while its first request waits gets no second dialog."""
+    peerlink.LEASE_S, peerlink.WARN_S = 2.0, 0.5
+    a, b = await linked()
+    await a.wait("closed", 8)
+    await b.wait("closed", 8)
+    a.slow["Accept connection"] = 4.0                   # Alice does not answer for 4 s
+    iroh, before, keep = b.pl._iroh, len(a.asked("Accept connection")), []
+    addr = iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(a.pl.me)), a.pl.relay, [])
+    for _ in range(3):
+        conn = await b.pl.ep.connect(addr, peerlink.ALPN)
+        bi = await conn.open_bi()
+        await bi.send().write_all(b'{"t":"hello"}\n')
+        keep.append((conn, bi))
+        await asyncio.sleep(0.8)
+    await asyncio.sleep(3.0)
+    assert len(a.asked("Accept connection")) - before == 1, a.asks
+
+
+async def test_loopback_only():
+    """Review I3: the endpoint has no socket on an address of this machine that a peer can reach."""
+    a = Side("alice")
+    await a.pl.start()
+    bound = [str(x) for x in a.pl.ep.bound_sockets()]
+    assert bound and all(x.startswith(("127.0.0.1:", "[::1]:")) for x in bound), bound
+
+
+async def test_consent_wait_limit():
+    """Review I5: the wait for a free dialog and the dialog together have one limit."""
+    peerlink.PENDING_S = 1.5
+    a = Side("alice")
+    await a.pl.start()
+    a.slow["Create"] = 4.0                              # the first dialog stays open
+    first = asyncio.ensure_future(a.pl.invite("Bob"))
+    await asyncio.sleep(0.2)
+    t0 = time.monotonic()
+    assert "refused" in await raises(a.pl.invite, "Carol")
+    assert time.monotonic() - t0 < 2.5, "the second request waited longer than the limit"
+    assert len(a.asked("Create")) == 1, "a dialog showed after its request had a refusal"
+    assert a.asks[0]["timeout"] <= 1.5
+    await first
+
+
+async def test_no_text_after_end():
+    """Review I6: after /peer end starts, no peer text reaches the session."""
+    a, b = await linked()
+    b_link = b.pl.links["alice"]
+    for task in b_link.tasks:                           # a hostile peer does not obey "bye" and does not close
+        task.cancel()
+
+    async def flood():
+        for i in range(60):
+            try:
+                await b.pl._write(b_link, {"t": "msg", "text": f"m{i}"})
+            except Exception:
+                return
+            await asyncio.sleep(0.05)
+    task = asyncio.ensure_future(flood())
+    await a.wait("msg", 5)
+    before = len([e for e in a.events if e["ev"] == "msg"])
+    await a.pl.end("Bob")
+    await asyncio.sleep(1.0)
+    task.cancel()
+    late = len([e for e in a.events if e["ev"] == "msg"]) - before
+    assert late == 0, f"{late} peer messages reached the session after the end command"
+
+
+async def test_saved_contact_needs_no_ticket():
+    """After the first link, each side keeps its key and the contact. A later request needs no ticket."""
+    da, db = home(), home()
+    a, b = Side("alice", home=da), Side("bob", home=db)
+    await up(a, b)
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await a.wait("open")
+    await b.wait("open")
+    keys = (a.pl.me, b.pl.me)
+    if os.name == "posix":
+        for d in (da, db):
+            for name in ("identity.key", "contacts.json"):
+                assert stat.S_IMODE(os.stat(os.path.join(d, name)).st_mode) == 0o600, (d, name)
+            assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+    await a.pl.close()                                  # the two helpers stop
+    await b.pl.close()
+    a2, b2 = Side("alice", home=da), Side("bob", home=db)
+    assert "Bob" in await a2.pl.listen()                # Alice listens; no ticket is made
+    await b2.pl.connect("alice")                        # Bob types /peer connect alice
+    await a2.wait("open", 30)
+    await b2.wait("open", 30)
+    assert (a2.pl.me, b2.pl.me) == keys
+    assert b2.asks == [], "a typed request to a saved contact showed a local dialog"
+    accept = a2.asked("Accept connection")
+    assert len(accept) == 1 and accept[0]["sound"] and "saved contact" in accept[0]["text"], a2.asks
+    await b2.pl.send("Alice", "hello again")
+    assert (await a2.wait("msg"))["text"] == "hello again"
+    await a2.pl.connect("Bob")                          # a renewal, typed by Alice: no dialog on her side
+    await b2.wait("renewed", 10)
+    assert not a2.asked("Ask ")
+
+
+async def test_one_helper_for_each_identity():
+    d = home()
+    a = Side("alice", home=d)
+    await a.pl.start()
+    assert "in use" in await raises(Side("alice-2", home=d).pl.start)
+    await a.pl.close()
+    c = Side("alice-3", home=d)
+    await c.pl.start()
+    assert c.pl.me == a.pl.me
+
+
+async def test_forget():
+    """A forgotten contact gets no dialog, and the local side cannot ask it without a new ticket."""
+    da = home()
+    a, b = Side("alice", home=da), Side("bob", home=home())
+    await up(a, b)
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await a.wait("open")
+    await b.wait("open")
+    assert "Bob" in await a.pl.forget("bob")            # this also ends the link
+    await a.wait("closed", 5)
+    assert "bob" not in open(os.path.join(da, "contacts.json")).read().lower()
+    await b.wait("closed", 5)
+    await b.pl.connect("Alice")                         # Bob still has the contact and asks
+    await b.wait("denied", 15)
+    assert len(a.asked("Accept connection")) == 1, "a forgotten contact made a popup"
+    assert "no ticket" in await raises(a.pl.connect, "Bob")
+    assert await raises(a.pl.forget, "Bob")
 
 
 async def test_dialog():
@@ -392,6 +618,8 @@ async def main(names):
                 except Exception:
                     pass
             SIDES.clear()
+            while HOMES:
+                shutil.rmtree(HOMES.pop(), ignore_errors=True)
     print(f"{len(tests) - failed} passed, {failed} failed")
     return 1 if failed else 0
 

@@ -23,8 +23,8 @@ WAIT_S = 540
 
 
 async def one(run_id, system):
-    _, secret, relay, endpoint = derive(f"{run_id}-{system}")
-    ticket = peerlink.make_ticket(endpoint, relay, secret)
+    _, secret, _, endpoint = derive(f"{run_id}-{system}")
+    ticket = peerlink.make_ticket(endpoint, secret)
     events = []
     pl = peerlink.PeerLink(events.append, ask=accept, session="laptop")
     end = time.monotonic() + WAIT_S

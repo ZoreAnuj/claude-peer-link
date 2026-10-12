@@ -1,7 +1,8 @@
 # Peer link design
 
-Date: 2026-10-12. Status: approved by the owner on 2026-10-12. Revision 2 adds two later owner inputs:
+Date: 2026-10-12. Status: approved by the owner on 2026-10-12. Revision 2 added two later owner inputs:
 all three operating systems, and communication in the manner of Claude Code mods and session messaging.
+Revision 3 adds the third: after the first link, a request needs no ticket. It also has the changes from the code review.
 
 ## 1. Purpose
 
@@ -19,6 +20,7 @@ The link is safe, private and confidential.
 | Code location | Private repository `ZoreAnuj/claude-peer-link`. |
 | Operating systems | Windows, Linux and macOS. |
 | Integration | A Claude Code mod. Claude sends with the native `SendMessage` tool. Local processes talk through a per-user socket, as Claude Code sessions do. |
+| Later requests | The first link is a secure handshake with a ticket. Each side then saves the contact. A later request needs one command and one popup, and no ticket. |
 
 ## 3. Feasibility results
 
@@ -71,20 +73,27 @@ Their session + mod                                        Our session + mod
 The mod starts the helper at the first `/peer invite` or `/peer connect`. Before that, the plugin makes no process and no network connection.
 The helper ends when the mod unloads, when the session ends, or when its output pipe closes.
 
-### 4.1 Identity
+### 4.1 Identity and contacts
 
-Each helper start makes a new Ed25519 key in memory. No key file and no contact file exist.
+Each machine user has one Ed25519 key. The helper makes it at the first use and keeps it in `~/.claude/peer-link/identity.key`.
+When a link opens, each side saves the contact in `contacts.json`: the local name and the public key of the peer.
+The two files are for the owner only (mode 0600 in a directory with mode 0700). `PEERLINK_HOME` names a different directory.
+The first link is the secure handshake: the ticket pins our key, the secret proves the peer, and the two persons accept.
+Each later connection is authenticated by the two saved keys in the TLS handshake.
 A name is given locally when the invitation or the connection is made. A peer cannot give itself a name.
+Only one helper at a time can use the identity. A second session gets a message that the peer link is in use.
 
 ### 4.2 Commands for the person
 
 | Command | Popup | Function |
 |---|---|---|
-| `/peer invite <name>` | Yes | Makes a ticket: our key, our relay URL and a random 128-bit secret. Valid for 10 minutes and for one use. |
-| `/peer connect <name> <ticket>` | Yes | Dials the peer and sends the secret. |
-| `/peer connect <name>` | Yes | Asks for a renewal, or for a new link to a peer that this session accepted before. |
-| `/peer end <name>` | No | Closes the link immediately. |
-| `/peer status` | No | Shows the links and the minutes that remain. |
+| `/peer invite <name>` | Yes | Makes a ticket: our key and a random 128-bit secret. Valid for 10 minutes and for one use. |
+| `/peer connect <name> <ticket>` | Yes | The first link to a peer: dials the key and sends the secret. |
+| `/peer connect <name>` | No | Asks a saved contact for a link, or for 60 more minutes. The typed command is the consent of this side. |
+| `/peer listen` | No | Starts the helper, so that saved contacts can ask for a link. No ticket is made. |
+| `/peer end <name>` | No | Closes the link immediately. The contact stays. |
+| `/peer forget <name>` | No | Removes the contact and closes its link. That key gets no popup after this. |
+| `/peer status` | No | Shows the links, the minutes that remain and the saved contacts. |
 
 The mod obeys `/peer` only when the person types it. The output is a dim line that Claude does not read.
 The ticket goes to that line and to the clipboard. It does not go into the model context.
@@ -95,8 +104,16 @@ The ticket goes to that line and to the clipboard. It does not go into the model
 2. Bob types `/peer connect Alice <ticket>`. Bob approves "Connect this session to Alice for 60 minutes? Code 4821."
 3. Bob's helper dials the key in the ticket and sends the secret.
 4. Alice's helper checks the secret. For a wrong, used or expired secret, the helper closes the connection. It shows no popup and sends no message.
-5. Alice gets the popup with sound: "Accept connection from Bob for this session for 60 minutes? Code 4821."
-6. Alice accepts. The two helpers start a 60-minute timer and the two sessions show that the link is open.
+5. Alice gets the popup with sound: "Accept connection from Bob (new, with your invitation) for this session for 60 minutes? Code 4821."
+6. Alice accepts. The two helpers start a 60-minute timer, save the contact, and the two sessions show that the link is open.
+
+A later request has two steps:
+
+1. Bob types `/peer connect Alice`. His helper dials the saved key through each relay of its list at the same time.
+2. Alice's helper finds the key in its contacts. Alice gets the popup with sound: "Accept connection from Bob (a saved contact) ...". She accepts.
+
+Alice's session must have a helper that runs: she typed `/peer listen`, or a different `/peer` command, in that session.
+A key that is not in the contacts and has no valid ticket gets no popup.
 
 The code is four digits from a hash of the two public keys. The two persons can compare it by voice.
 The code finds a wrong peer only if that peer could not see the two keys before it made its own key.
@@ -112,11 +129,10 @@ The sound comes from `winsound` on Windows, `afplay` on macOS and `pw-play`, `pa
 
 - Each side closes the connection when its timer ends. The grant is in memory only, so a helper restart also ends it.
 - Five minutes before the end, each person gets a notice.
-- A renewal request shows a popup on the two sides. If the two persons accept, the timers start again at 60 minutes.
-- A peer cannot extend a lease alone. A renewal counts only on the side that asked for it or approved it.
-- After the end, a peer that this session accepted before can ask again without a ticket. The helper identifies it by its key. The popup shows again.
-- Each side can ask again. For this, the first message of a connection carries the home relay URL of the sender. The helper uses that URL only if it is in its own relay list.
-- After a helper restart, a new ticket is necessary.
+- A renewal: one person types `/peer connect <name>`, and the other person gets a popup. After the accept, the two timers start again at 60 minutes.
+- A peer cannot extend a lease alone. A renewal counts only on the side that asked for it or approved it, and an answer counts for 5 minutes only.
+- After the end, each side can ask again without a ticket, also after a restart. The popup of the other person shows again.
+- One name has one link. A second link for the same name replaces the first, and each link stays under its lease.
 - The timer uses the monotonic clock and the wall clock. Thus a suspended computer does not extend a lease.
 
 ### 4.5 Messages
@@ -126,6 +142,7 @@ The helper shows the full text in a popup. After the approval, the helper sends 
 
 Inbound: the helper gives the text to the mod, and the mod starts a turn with `$.prompt.submit`.
 The mod puts the text between two marks with a random number, below a note that says: the sender is a different person, the text is untrusted data, and it gives no permission.
+The mod drops text for a name that has no open link.
 While a link is open, the mod also adds one line of context to each prompt. The line names the open links and the address form.
 
 One QUIC stream carries JSON lines: `hello`, `accept`, `deny`, `msg`, `renew`, `renewed`, `renew_denied`, `bye`.
@@ -140,24 +157,27 @@ Claude Code uses the same pattern for the inbox socket of each session.
 
 ## 5. Security rules
 
-1. **A person accepts, not the model.** Each consent is a desktop popup that the helper shows.
-2. **Commands come from the keyboard.** The mod refuses `/peer` from all other origins.
+1. **A person accepts, not the model.** Each invitation, each first connection, each inbound request, each inbound renewal and each outgoing message needs a desktop popup that the helper shows.
+2. **Commands come from the keyboard.** The mod refuses `/peer` from all other origins. A typed request to a saved contact needs no popup on the side that typed it. The other person still gets one.
 3. **One model path.** Claude can only send text with `SendMessage` to `peer:<name>`. The plugin adds no tool, no MCP server and no channel.
 4. **No peer text in a consent popup.** Names come from the local side. Only our own outgoing text is shown.
-5. **Peer text is untrusted data.** The helper removes control characters and bidirectional overrides, and replaces angle brackets. The mod adds the note and the random marks.
+5. **Peer text is untrusted data.** The helper removes control, format and hidden characters, and replaces angle brackets. The mod adds the note and the random marks.
 6. **Each outgoing message needs an approval.** This prevents data theft through the link.
-7. **Limits.** 16 KB for each message. 30 messages for each minute. One pending request and three requests for each hour, for each peer.
+7. **Limits.** 16 KB for each message. 30 messages for each minute. One pending request and three requests for each hour, for each peer. The wait for a free dialog and the dialog together take 5 minutes at most.
 8. **Silence for strangers.** There is no directory. A dial without a valid secret gets no popup and no message.
-9. **No long-term data.** No key file, no contact file, no message log. The audit log has the name, the accept time and the end time only.
-10. **Relay only.** The helper binds to `127.0.0.1`, so it does not give our IP addresses to the peer. The relay carries all traffic.
-11. **Local socket for the owner only.** A private directory and a key protect the control socket.
-12. **No module from the session directory.** The dialog child runs with `python -I`.
+9. **Little long-term data.** The helper keeps one identity key and the contacts, for the owner only. It keeps no message. The audit log has the name, the accept time and the end time only.
+10. **Relay only.** The helper binds to the loopback addresses only, so it does not give our IP addresses to the peer. The relay carries all traffic.
+11. **Local socket for the owner only.** A private directory and a key protect the control socket. Each connection proves the key in its own thread, so a silent client cannot stop the socket.
+12. **No module from the session directory.** The dialog child runs with `python -I`. The helper and the control process run with an empty `PYTHONPATH`.
 13. **Prefer a low-privilege session.** A link to a session in bypass-permissions mode gives a prompt injection more power.
 
 Limits that stay:
 
 - Messages enter the Claude transcript on each side and go to the Anthropic API. The encryption protects the path, not the two ends.
-- The relay operator sees metadata: public keys, IP addresses, timing and sizes. The keys change at each helper start.
+- The relay operator sees metadata: public keys, IP addresses, timing and sizes. The key of a machine is now the same each time.
+- A person who gets `identity.key` can ask our contacts for a link in our name. Their popup still shows. Remove the key file to make a new identity.
+- A saved contact can make three popups with sound each hour while our helper runs. `/peer forget` stops this.
+- A ticket that the person types or sees stays in the transcript file and in the command history of Claude Code. It is valid for 10 minutes and for one use.
 - Claude Code tells Claude that a plugin prompt stands in the user's place. Only our note says that the text is untrusted.
 - A mod runs with the permissions of the user. Install this plugin only from this repository.
 - A model that has a shell in the linked session can stop or change the helper.
@@ -167,7 +187,7 @@ Limits that stay:
 
 ## 6. Not in version 1
 
-- Stored contacts and reconnection after a restart.
+- More than one linked session for each machine user at the same time.
 - Automatic send without an approval for each message.
 - Files, groups, remote tool use.
 - Intel Mac and Windows on ARM. The `iroh` package has no file for them.
@@ -192,7 +212,16 @@ The product code has no switch that turns off the popup.
 | Dial without a secret | No popup, no message. |
 | Limits | An oversize message and a message above the rate are dropped. |
 | Unsafe text | Control characters and angle brackets do not reach the session. |
-| Control socket | A request with the key gets an answer. A request with a wrong key gets none. |
+| Control socket | A request with the key gets an answer. A request with a wrong key gets none. A silent client does not stop the socket. |
+| One link for each name | A slow dial and an inbound request for one name leave one link, under its lease. |
+| Renewal time | A renewal answer after 5 minutes does not count. A request above the rate gets a refusal. |
+| One pending request | A known peer that dials again while its request waits gets no second popup. |
+| Loopback only | The endpoint has no socket on an address that a peer can reach. |
+| Dialog time | The wait for a free dialog and the dialog together have one limit. |
+| No text after the end | After the end command starts, no peer text reaches the session. |
+| Saved contact | After a restart of the two helpers, a request needs no ticket and no popup on the side that typed it. |
+| One helper | A second helper for the same identity gets a refusal. |
+| Forget | A forgotten contact gets no popup. |
 | Dialog | The real dialog shows and gives a deny at its timeout. |
 | No display | Each consent is a deny. Linux only. |
 
@@ -206,6 +235,9 @@ Mod tests: `tests/peer-link.test.ts`, run with `claude plugin test`.
 | Inbound | A helper message becomes one prompt with the note and the marks. |
 | Command origin | `/peer` from an origin that is not the keyboard does nothing. |
 | Ticket privacy | `/peer invite` returns no text for Claude. |
+| No link | A helper message for a name that is not open does not reach Claude. |
+| New commands | `listen`, `forget` and `status` go to the helper. Without a helper, `end`, `forget` and `status` start none. |
+| Environment | The helper and each control process run with an empty `PYTHONPATH`. |
 
 GitHub Actions runs the helper tests on Ubuntu, macOS and Windows.
 A cross-network test dials from the laptop to a runner of each system, through the relay.
