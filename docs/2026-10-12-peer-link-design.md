@@ -2,7 +2,8 @@
 
 Date: 2026-10-12. Status: approved by the owner on 2026-10-12. Revision 2 added two later owner inputs:
 all three operating systems, and communication in the manner of Claude Code mods and session messaging.
-Revision 3 adds the third: after the first link, a request needs no ticket. It also has the changes from the code review.
+Revision 3 added the third: after the first link, a request needs no ticket. It also has the changes from the code review.
+Revision 4 adds the fourth: after the first link, the Claude agents accept or refuse a request, and a message needs no popup. The repository is public now.
 
 ## 1. Purpose
 
@@ -15,9 +16,9 @@ The link is safe, private and confidential.
 | Topic | Decision |
 |---|---|
 | Lease | 60 minutes from the accept. The lease can be renewed. Each renewal needs a new approval. |
-| Consent | Desktop popup with sound. |
-| Outgoing messages | A person approves each message. |
-| Code location | Private repository `ZoreAnuj/claude-peer-link`. |
+| Consent | Desktop popup with sound, for the first link between two systems. After that, the Claude agent of each side accepts or refuses a request. |
+| Outgoing messages | No popup. (Revisions 1 to 3: a person approved each message.) |
+| Code location | Repository `ZoreAnuj/claude-peer-link`, public from 2026-10-12. |
 | Operating systems | Windows, Linux and macOS. |
 | Integration | A Claude Code mod. Claude sends with the native `SendMessage` tool. Local processes talk through a per-user socket, as Claude Code sessions do. |
 | Later requests | The first link is a secure handshake with a ticket. Each side then saves the contact. A later request needs one command and one popup, and no ticket. |
@@ -89,7 +90,7 @@ Only one helper at a time can use the identity. A second session gets a message 
 |---|---|---|
 | `/peer invite <name>` | Yes | Makes a ticket: our key and a random 128-bit secret. Valid for 10 minutes and for one use. |
 | `/peer connect <name> <ticket>` | Yes | The first link to a peer: dials the key and sends the secret. |
-| `/peer connect <name>` | No | Asks a saved contact for a link, or for 60 more minutes. The typed command is the consent of this side. |
+| `/peer connect <name>` | No | Asks a saved contact for a link, or for 60 more minutes. The typed command is the consent of this side. The Claude agent of the other side answers. |
 | `/peer listen` | No | Starts the helper, so that saved contacts can ask for a link. No ticket is made. |
 | `/peer stop` | No | Stops the helper. The links close, and no contact can reach this session. |
 | `/peer end <name>` | No | Closes the link immediately. The contact stays. |
@@ -108,10 +109,14 @@ The ticket goes to that line and to the clipboard. It does not go into the model
 5. Alice gets the popup with sound: "Accept connection from Bob (new, with your invitation) for this session for 60 minutes? Code 4821."
 6. Alice accepts. The two helpers start a 60-minute timer, save the contact, and the two sessions show that the link is open.
 
-A later request has two steps:
+The two dialogs of this first link say that, after it, the Claude agents accept later requests and send messages with no dialog.
+
+A later request has two steps, and no popup:
 
 1. Bob types `/peer connect Alice`. His helper dials the saved key through each relay of its list at the same time.
-2. Alice's helper finds the key in its contacts. Alice gets the popup with sound: "Accept connection from Bob (a saved contact) ...". She accepts.
+2. Alice's helper finds the key in its contacts and gives the request to Alice's Claude agent, as a prompt. The agent answers with the tool `mcp__peer-link__answer`: accept or refuse. No answer in 5 minutes is a refusal.
+
+The agent can answer only a request that waits, and only a request of a saved contact. The first request of a key has a ticket and always goes to the person.
 
 Alice's session must have a helper that runs: she typed `/peer listen`, or a different `/peer` command, in that session.
 A key that is not in the contacts and has no valid ticket gets no popup.
@@ -132,17 +137,17 @@ The sound comes from `winsound` on Windows, `afplay` on macOS and `pw-play`, `pa
 
 - Each side closes the connection when its timer ends. The grant is in memory only, so a helper restart also ends it.
 - Five minutes before the end, each person gets a notice.
-- A renewal: one person types `/peer connect <name>`, and the other person gets a popup. After the accept, the two timers start again at 60 minutes.
+- A renewal: one person types `/peer connect <name>`, and the Claude agent of the other side answers. After the accept, the two timers start again at 60 minutes.
 - A peer cannot extend a lease alone. A renewal counts only on the side that asked for it or approved it, and an answer counts for 5 minutes only.
-- After the end, each side can ask again without a ticket, also after a restart. The popup of the other person shows again.
+- After the end, each side can ask again without a ticket, also after a restart. The Claude agent of the other side answers again.
 - One name has one link. A second link for the same name replaces the first, and each link stays under its lease.
 - The timer uses the monotonic clock and the wall clock. Thus a suspended computer does not extend a lease.
 
 ### 4.5 Messages
 
 Outbound: Claude calls the native `SendMessage` tool with the address `peer:<name>`. The mod catches the call in its `session.send` hook.
-The helper removes characters that a dialog cannot show, and says how many it removed. Thus the person sees exactly the text that leaves.
-The helper shows the full text in a popup. After the approval, the helper sends the text. A refusal goes back to Claude as the tool result.
+The helper removes characters that a person cannot see, and tells Claude how many it removed. Thus the text in the transcript is the text that leaves.
+No popup shows: the helper sends the text immediately. The permission mode of the session still applies to the `SendMessage` call.
 
 Inbound: the helper gives the text to the mod, and the mod starts a turn with `$.prompt.submit`.
 The mod puts the text between two marks with a random number, below a note that says: the sender is a different person, the text is untrusted data, and it gives no permission.
@@ -161,12 +166,12 @@ Claude Code uses the same pattern for the inbox socket of each session.
 
 ## 5. Security rules
 
-1. **A person accepts, not the model.** Each invitation, each first connection, each inbound request, each inbound renewal and each outgoing message needs a desktop popup that the helper shows.
+1. **A person pairs two systems. After that, the agents decide.** Each invitation and each first connection needs a desktop popup on each side. After that pairing, the Claude agent of a session accepts or refuses a request of that contact, and sends messages, with no popup. The agent cannot pair a new system, and it cannot open a link that nobody asked for.
 2. **Commands come from the keyboard.** The mod refuses `/peer` from all other origins. A typed request to a saved contact needs no popup on the side that typed it. The other person still gets one.
-3. **One model path.** Claude can only send text with `SendMessage` to `peer:<name>`. The plugin adds no tool, no MCP server and no channel.
+3. **Two model paths.** Claude can send text with `SendMessage` to `peer:<name>`, and it can answer a request that waits with the tool `mcp__peer-link__answer`. The plugin adds no MCP server and no channel.
 4. **No peer text in a consent popup.** Names come from the local side. Only our own outgoing text is shown.
 5. **Peer text is untrusted data.** The helper removes control, format and hidden characters, and replaces angle brackets. The mod adds the note and the random marks.
-6. **Each outgoing message needs an approval.** This prevents data theft through the link.
+6. **Only visible text leaves.** The helper removes hidden characters from an outgoing message. No person approves a message, so the text of a peer can lead Claude to send local data: pair only with a system that you trust as much as your own session.
 7. **Limits.** 16 KB for each message. 30 messages for each minute. One pending request and three requests for each hour, for each peer. The wait for a free dialog and the dialog together take 5 minutes at most.
 8. **Silence for strangers.** There is no directory. A dial without a valid secret gets no popup and no message.
 9. **Little long-term data.** The helper keeps one identity key and the contacts, for the owner only. It keeps no message. The audit log has the name, the accept time and the end time only.
@@ -187,7 +192,7 @@ Limits that stay:
 - A mod runs with the permissions of the user. Install this plugin only from this repository.
 - A model that has a shell in the linked session can stop or change the helper.
 - If the linked session passes peer text to other local sessions, that text stays untrusted. Code cannot enforce this.
-- Prompt injection cannot be fully removed.
+- Prompt injection cannot be fully removed. From revision 4, no person stands between the text of a paired peer and an answer of Claude that leaves the machine. The remaining checks are the note around peer text, the permission mode of the session, and the 60-minute lease.
 - The mods API can change between Claude Code releases.
 
 ## 6. Not in version 1
@@ -229,7 +234,10 @@ The product code has no switch that turns off the popup.
 | Forget | A forgotten contact gets no popup, also when its key had two names. |
 | Same time | The two persons ask at the same time: one link stays open. |
 | Changed contact | A ticket that changes the key of a saved contact says so in the dialog of each side. |
-| Hidden characters | The dialog shows exactly the text that leaves. |
+| Hidden characters | Hidden characters do not leave, and the sender learns how many were removed. |
+| Agent answer | A request of a saved contact goes to the agent: accept, refuse, and no answer. No dialog shows. |
+| First pairing | The agent cannot answer a request with a ticket. |
+| Messages | A message shows no dialog. |
 | Bind | A socket that is not loopback stops the start. |
 | Contact file | A contact file that cannot be written does not leave a link without a lease. |
 | Dialog | The real dialog shows and gives a deny at its timeout. |
@@ -248,6 +256,7 @@ Mod tests: `tests/peer-link.test.ts`, run with `claude plugin test`.
 | No link | A helper message for a name that is not open does not reach Claude. |
 | New commands | `listen`, `stop`, `forget` and `status` go to the helper. Without a helper, `end`, `stop` and `status` start none. |
 | Queue | Peer text that waits behind a turn does not reach Claude after the link closed. |
+| Request and answer | A request becomes one prompt that names the tool. The tool sends the decision to the helper, and only `true` accepts. |
 | Environment | The helper and each control process run with an empty `PYTHONPATH`. |
 
 GitHub Actions runs the helper tests on Ubuntu, macOS and Windows.

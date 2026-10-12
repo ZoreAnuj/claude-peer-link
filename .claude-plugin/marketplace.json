@@ -6,7 +6,7 @@
     {
       "name": "peer-link",
       "source": "./",
-      "description": "Link this session to a Claude Code session of a different person, with a popup consent and a 60-minute lease."
+      "description": "Link this session to a Claude Code session of a different person, with a pairing in a desktop popup and a 60-minute lease."
     }
   ]
 }

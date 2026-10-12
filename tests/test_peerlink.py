@@ -38,14 +38,30 @@ KNOBS = ("LEASE_S", "TICKET_S", "PENDING_S", "PENDING_GRACE_S", "WARN_S", "RATE_
 
 
 class Side:
-    """One helper with a recorded, scripted consent function and an event list."""
+    """One helper with a recorded, scripted person (the dialogs) and a scripted Claude agent (the requests)."""
 
     def __init__(self, label, deny=(), home=None):
         self.label, self.deny = label, deny
         self.events, self.asks, self.seen = [], [], 0
-        self.slow = {}  # keyword -> seconds to wait before the answer
-        self.pl = PeerLink(self.events.append, ask=self.ask, session=label, **({"home": home} if home else {}))
+        self.slow = {}      # keyword -> seconds that the person waits before the answer
+        self.agent = True   # the answer of the Claude agent to a request of a saved contact; None is no answer
+        self.pl = PeerLink(self._emit, ask=self.ask, session=label, **({"home": home} if home else {}))
         SIDES.append(self)
+
+    def _emit(self, event):
+        self.events.append(event)
+        if event["ev"] == "request" and self.agent is not None:
+            asyncio.ensure_future(self._answer(event["name"]))
+
+    async def _answer(self, name):
+        try:
+            await self.pl.answer(name, self.agent)
+        except PeerError:
+            pass
+
+    def requests(self):
+        """The requests that went to the Claude agent of this side."""
+        return [e for e in self.events if e["ev"] == "request"]
 
     async def ask(self, title, text, body="", sound=False, yes="Accept", timeout=None):
         self.asks.append({"text": text, "body": body, "sound": sound, "timeout": timeout})
@@ -169,7 +185,7 @@ async def test_accept():
     m = await a.wait("msg")
     assert m["name"] == "Bob" and m["text"] == "hi ‹b› there", m
     assert len(m["mark"]) == 8 and int(m["mark"], 16) >= 0
-    assert b.asked("Send this message")[0]["body"] == "hi <b> there"   # the bell character is not visible, so it does not leave
+    assert len(b.asks) == 1 and len(a.asks) == 2, "a message showed a dialog"   # only the dialogs of the first pairing
 
     await a.pl.send("Bob", "hello Bob")
     m2 = await b.wait("msg")
@@ -206,10 +222,6 @@ async def test_local_refusal():
     await asyncio.sleep(1.5)
     assert not a.asked("Accept connection"), "a refused connect made a dial"
 
-    a, b = await linked(b_deny=("Send this message",))
-    assert "refused" in await raises(b.pl.send, "Alice", "secret text")
-    await a.absent("msg", 1.5)
-
 
 async def test_lease_end():
     peerlink.LEASE_S, peerlink.WARN_S = 3.0, 2.0
@@ -232,12 +244,13 @@ async def test_renewal():
     assert (await a.wait("renewed", 5))["name"] == "Bob"
     assert (await b.wait("renewed", 5))["name"] == "Alice"
     assert len(b.asks) == 1, f"a typed renewal request showed a local dialog: {b.asks}"   # only the first connect
-    assert a.asked("Renew the connection")[0]["sound"]
+    assert len(a.asks) == 2 and [e["kind"] for e in a.requests()] == ["renew"], "the renewal went to a dialog, not to the agent"
     await asyncio.sleep(max(0.0, 4.8 - (time.monotonic() - t0)))  # past the first lease end
     assert [x["state"] for x in a.pl.status() + b.pl.status()] == ["open", "open"]
     await a.wait("closed", 6)
 
-    a, b = await linked(a_deny=("Renew the connection",))
+    a, b = await linked()
+    a.agent = False   # the agent of Alice refuses
     await b.pl.connect("Alice")
     assert (await b.wait("renew_denied", 5))["name"] == "Alice"
     await a.absent("renewed", 0.5)
@@ -262,13 +275,13 @@ async def test_ask_again():
     await b.pl.connect("Alice")  # no ticket: Bob asks again
     await a.wait("open", 20)
     await b.wait("open", 20)
-    assert len(a.asked("Accept connection")) == 2 and a.asked("Accept connection")[1]["sound"]
+    assert len(a.asked("Accept connection")) == 1 and [e["kind"] for e in a.requests()] == ["connect"]   # no dialog: the agent
     await a.wait("closed", 6)
     await b.wait("closed", 6)
     await a.pl.connect("Bob")  # the other direction
     await b.wait("open", 20)
     await a.wait("open", 20)
-    assert len(b.asked("Accept connection")) == 1 and b.asked("Accept connection")[0]["sound"]
+    assert not b.asked("Accept connection") and len(b.requests()) == 1
     assert await raises(Side("carol").pl.connect, "Alice")  # no ticket and no earlier link
 
 
@@ -332,7 +345,7 @@ async def test_request_rate():
     await b.wait("closed", 6)
     await b.pl.connect("Alice")  # the second request in one hour
     await b.wait("denied", 15)
-    assert len(a.asked("Accept connection")) == 2, "a request above the rate made a popup"
+    assert len(a.requests()) == 1, "a request above the rate went to the agent"
 
 
 async def test_end():
@@ -402,7 +415,7 @@ async def test_no_link_outside_the_table():
     await b.wait("open", 10)
     t_open, inbound, b_link = time.monotonic(), a.pl.links["bob"], b.pl.links["alice"]
     b_link.expires = b_link.expires_wall = float("inf")   # a hostile peer does not obey its own timer
-    b.deny = ("Accept connection",)
+    b.agent = False   # the agent of Bob refuses the late dial of Alice
     try:
         await dial
     except PeerError:
@@ -424,7 +437,7 @@ async def test_late_renewed():
     peerlink.LEASE_S, peerlink.WARN_S, peerlink.PENDING_S, peerlink.PENDING_GRACE_S = 6.0, 0.5, 1.0, 0.5
     a, b = await linked()
     t0, b_link = time.monotonic(), b.pl.links["alice"]
-    b.slow["Renew the connection"] = 60.0               # Bob never answers the request
+    b.agent = None                                      # the agent of Bob never answers the request
     b_link.expires = b_link.expires_wall = float("inf")
     await a.pl.connect("Bob")                           # Alice asks for a renewal
     await asyncio.sleep(5.0 - (time.monotonic() - t0))
@@ -440,7 +453,7 @@ async def test_renewal_always_gets_an_answer():
     a, b = await linked()
     await b.pl.connect("Alice")
     assert (await b.wait("renew_denied", 5))["name"] == "Alice"
-    assert not a.asked("Renew the connection")
+    assert not a.requests(), "a request above the rate went to the agent"
     await b.pl.connect("Alice")                         # not "a renewal request waits"
     await b.wait("renew_denied", 5)
 
@@ -451,8 +464,8 @@ async def test_one_pending_request():
     a, b = await linked()
     await a.wait("closed", 8)
     await b.wait("closed", 8)
-    a.slow["Accept connection"] = 4.0                   # Alice does not answer for 4 s
-    iroh, before, keep = b.pl._iroh, len(a.asked("Accept connection")), []
+    a.agent = None                                      # the agent of Alice gives no answer
+    iroh, before, keep = b.pl._iroh, len(a.requests()), []
     addr = iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(a.pl.me)), a.pl.relay, [])
     for _ in range(3):
         conn = await b.pl.ep.connect(addr, peerlink.ALPN)
@@ -461,7 +474,7 @@ async def test_one_pending_request():
         keep.append((conn, bi))
         await asyncio.sleep(0.8)
     await asyncio.sleep(3.0)
-    assert len(a.asked("Accept connection")) - before == 1, a.asks
+    assert len(a.requests()) - before == 1, a.requests()
 
 
 async def test_loopback_only():
@@ -535,13 +548,12 @@ async def test_saved_contact_needs_no_ticket():
     await b2.wait("open", 30)
     assert (a2.pl.me, b2.pl.me) == keys
     assert b2.asks == [], "a typed request to a saved contact showed a local dialog"
-    accept = a2.asked("Accept connection")
-    assert len(accept) == 1 and accept[0]["sound"] and "saved contact" in accept[0]["text"], a2.asks
+    assert a2.asks == [] and [e["kind"] for e in a2.requests()] == ["connect"], "a request of a saved contact showed a dialog"
     await b2.pl.send("Alice", "hello again")
     assert (await a2.wait("msg"))["text"] == "hello again"
     await a2.pl.connect("Bob")                          # a renewal, typed by Alice: no dialog on her side
     await b2.wait("renewed", 10)
-    assert not [x for x in a2.asks if "Accept connection" not in x["text"]], a2.asks   # no dialog for the request that Alice typed
+    assert a2.asks == [] and b2.asks == [] and [e["kind"] for e in b2.requests()] == ["renew"]   # no dialog on the two sides
 
 
 async def test_one_helper_for_each_identity():
@@ -569,7 +581,7 @@ async def test_forget():
     await b.wait("closed", 5)
     await b.pl.connect("Alice")                         # Bob still has the contact and asks
     await b.wait("denied", 15)
-    assert len(a.asked("Accept connection")) == 1, "a forgotten contact made a popup"
+    assert len(a.asked("Accept connection")) == 1 and not a.requests(), "a forgotten contact got a dialog or a request"
     assert "no ticket" in await raises(a.pl.connect, "Bob")
     assert await raises(a.pl.forget, "Bob")
 
@@ -613,10 +625,10 @@ async def test_forget_removes_each_name_of_the_key():
     await a.pl.forget("Bob")
     assert a.pl.contact_names() == [] and a.pl.status() == []
     await b.wait("closed", 5)
-    before = len(a.asked("Accept connection"))
+    before = (len(a.asks), len(a.requests()))
     await b.pl.connect("Alice")
     await b.wait("denied", 15)
-    assert len(a.asked("Accept connection")) == before, "a forgotten key got a dialog under its second name"
+    assert (len(a.asks), len(a.requests())) == before, "a forgotten key got a dialog or a request under its second name"
 
 
 async def test_ticket_for_a_saved_name_warns():
@@ -638,7 +650,7 @@ async def test_ticket_for_a_saved_name_warns():
 
 
 async def test_hidden_characters_do_not_leave():
-    """Review 2, item 4: the person sees in the dialog exactly the text that leaves."""
+    """Review 2, item 4: characters that a person cannot see do not leave, and the sender learns it."""
     a, b = await linked()
     frames, write = [], b.pl._write
 
@@ -646,9 +658,8 @@ async def test_hidden_characters_do_not_leave():
         frames.append(frame)
         await write(link, frame)
     b.pl._write = spy
-    await b.pl.send("Alice", "price" + chr(0x200B) + chr(0xE0041) + chr(0xE0042) + " list" + chr(0x202E))
-    shown = b.asked("Send this message")[0]
-    assert shown["body"] == "price list" and "4 hidden characters" in shown["text"], shown
+    answer = await b.pl.send("Alice", "price" + chr(0x200B) + chr(0xE0041) + chr(0xE0042) + " list" + chr(0x202E))
+    assert "4 hidden characters" in answer, answer
     assert frames[-1] == {"t": "msg", "text": "price list"}, frames[-1]
     assert (await a.wait("msg"))["text"] == "price list"
     assert "empty" in await raises(b.pl.send, "Alice", chr(0x200B) * 5)
@@ -693,6 +704,54 @@ async def test_helper_stops_with_its_reader():
     finally:
         if serve.poll() is None:
             serve.kill()
+
+
+async def test_agent_answers_a_saved_contact():
+    """After the pairing, the Claude agent of a side accepts or refuses a request. No dialog shows."""
+    peerlink.LEASE_S, peerlink.WARN_S = 2.0, 0.5
+    a, b = await linked()
+    await a.wait("closed", 6)
+    await b.wait("closed", 6)
+    dialogs = len(a.asks) + len(b.asks)
+    a.agent = False
+    await b.pl.connect("Alice")
+    await b.wait("denied", 15)
+    assert a.pl.status() == [] and b.pl.status() == []
+    a.agent = True
+    await b.pl.connect("Alice")
+    await a.wait("open", 15)
+    await b.wait("open", 15)
+    assert len(a.asks) + len(b.asks) == dialogs, "a request of a saved contact showed a dialog"
+    assert [(e["name"], e["kind"]) for e in a.requests()] == [("Bob", "connect")] * 2
+    await b.pl.send("Alice", "no dialog for this")
+    assert (await a.wait("msg", 5))["text"] == "no dialog for this"
+    assert len(a.asks) + len(b.asks) == dialogs, "a message showed a dialog"
+
+
+async def test_no_answer_is_a_refusal():
+    peerlink.LEASE_S, peerlink.WARN_S, peerlink.PENDING_S, peerlink.PENDING_GRACE_S = 2.0, 0.5, 1.5, 0.5
+    a, b = await linked()
+    await a.wait("closed", 6)
+    await b.wait("closed", 6)
+    a.agent = None   # the agent of Alice gives no answer
+    await b.pl.connect("Alice")
+    await b.wait("denied", 8)
+    assert a.pl.status() == []
+    assert "no request" in await raises(a.pl.answer, "Bob", True)   # an answer after the time limit opens nothing
+    assert a.pl.status() == []
+
+
+async def test_agent_cannot_accept_a_first_pairing():
+    """A request with a ticket is for the person. An answer of the agent does not open it."""
+    a, b = Side("alice"), Side("bob")
+    await up(a, b)
+    a.slow["Accept connection"] = 3.0   # the dialog of the person is open
+    await b.pl.connect("Alice", await a.pl.invite("Bob"))
+    await asyncio.sleep(1.2)
+    assert "no request" in await raises(a.pl.answer, "Bob", True)
+    assert not a.requests() and a.pl.status() == []
+    await a.wait("open", 10)            # the person accepted in the dialog
+    assert "no request" in await raises(a.pl.answer, "Carol", True)
 
 
 async def test_dialog_input_with_a_byte_order_mark():

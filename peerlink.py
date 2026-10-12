@@ -273,7 +273,8 @@ class PeerLink:
         self.contacts = {}    # lower-case name -> {"name", "key"}: peers that this identity accepted
         self.tickets = {}     # secret -> (name, expiry on the monotonic clock)
         self.requests = {}    # peer key -> times of its requests without a ticket
-        self.pending = set()  # peer keys with a request that waits for the person
+        self.pending = set()  # peer keys with a request that waits for an answer
+        self.asking = {}      # lower-case name -> future: a request of a saved contact that waits for the Claude agent
         self._tasks = set()
         self._lock_file = None
         self._start_lock = asyncio.Lock()
@@ -318,7 +319,9 @@ class PeerLink:
             code = code_for(bytes.fromhex(self.me), bytes.fromhex(peer))
             if not await self._consent(
                     f'Connect this session{self._where()} to "{name}" for {self._minutes()} minutes?\n\n'
-                    f"Code {code}. The code must be the same on the two screens.{self._replaces(name, peer)}", yes="Connect"):
+                    f"Code {code}. The code must be the same on the two screens.\n\n"
+                    f"After this, the Claude agents of the two systems accept later requests and send messages "
+                    f"with no dialog.{self._replaces(name, peer)}", yes="Connect"):
                 raise PeerError("the local user refused in the dialog")
         elif key in self.contacts:
             # the person typed the command for a saved contact: that is the consent of this side
@@ -347,20 +350,29 @@ class PeerLink:
         return f'Request sent to "{name}". The result follows when the peer answers.'
 
     async def send(self, name, text):
+        """A message to a paired peer. No dialog: the two persons paired the two systems before.
+
+        Only characters that a person can see in the transcript leave."""
         link = self._live(self.links.get(check_name(name).lower()), name)
-        # The person approves the text in a dialog, so only characters that a dialog shows can leave.
         clean = visible(text) if isinstance(text, str) else ""
         if not clean.strip():
             raise PeerError("the message is empty or is not valid text")
         if len(clean.encode("utf-8")) > MAX_MSG_BYTES:
             raise PeerError(f"the message is larger than {MAX_MSG_BYTES} bytes")
-        hidden = len(text) - len(clean)
-        note = f"\n\n{hidden} hidden characters were removed." if hidden else ""
-        if not await self._consent(f'Send this message to "{link.name}"?{note}', body=clean, yes="Send"):
-            raise PeerError("the local user refused this message in the dialog")
-        self._live(link, name)
         await self._write(link, {"t": "msg", "text": clean})
-        return f'Sent to "{link.name}".'
+        hidden = len(text) - len(clean)
+        return f'Sent to "{link.name}".' + (f" {hidden} hidden characters were removed first." if hidden else "")
+
+    async def answer(self, name, accept):
+        """The Claude agent of this session accepts or refuses a request of a saved contact.
+
+        It can answer only a request that waits. It cannot answer the first request of a peer: that one has a ticket
+        and goes to the person, in a dialog."""
+        waiting = self.asking.get(check_name(name).lower())
+        if waiting is None or waiting.done():
+            raise PeerError(f'no request of "{name}" waits for an answer')
+        waiting.set_result(accept is True)
+        return f'The request of "{name}" is {"accepted" if accept is True else "refused"}.'
 
     async def end(self, name):
         link = self.links.get(check_name(name).lower())
@@ -560,12 +572,15 @@ class PeerLink:
             name, saved = admitted
             self.pending.add(peer)
             waits = True
-            code = code_for(bytes.fromhex(self.me), bytes.fromhex(peer))
-            origin = "a saved contact" if saved else "new, with your invitation"
-            ok = await self._consent(
-                f'Accept connection from "{name}" ({origin}) for this session{self._where()} '
-                f"for {self._minutes()} minutes?\n\nCode {code}. The code must be the same on the two screens."
-                f"{self._replaces(name, peer)}", sound=True)
+            if saved:   # the two persons paired these systems before: the Claude agent of this session answers
+                ok = await self._decide(name, "connect")
+            else:       # the first request of this key: the person answers
+                code = code_for(bytes.fromhex(self.me), bytes.fromhex(peer))
+                ok = await self._consent(
+                    f'Accept connection from "{name}" (new, with your invitation) for this session{self._where()} '
+                    f"for {self._minutes()} minutes?\n\nCode {code}. The code must be the same on the two screens.\n\n"
+                    f'After this, the Claude agents of the two systems accept later requests and send messages '
+                    f"with no dialog.{self._replaces(name, peer)}", sound=True)
             link = Link(name, peer, conn, bi.send())
             if not ok:
                 await asyncio.wait_for(self._write(link, {"t": "deny"}), 5)
@@ -577,7 +592,7 @@ class PeerLink:
             if old is not None:
                 self._detach(old, "a new link replaced it")
             self.links[link.key] = link
-            self._open(link)
+            self._open(link, "the Claude agent" if saved else "the person")
             link.tasks = [self._spawn(self._reader(link, frames)), self._spawn(self._lease(link))]
             conn = None   # the link owns the connection now
             if old is not None:
@@ -624,7 +639,7 @@ class PeerLink:
 
     # ---- one link
 
-    def _open(self, link):
+    def _open(self, link, by):
         link.state = "open"
         self._extend(link)
         self.contacts[link.key] = {"name": link.name, "key": link.peer}   # the two keys are now paired
@@ -633,7 +648,7 @@ class PeerLink:
         except OSError as e:   # the mod shows lines with this mark to the person
             print(f"peerlink: the contact could not be saved ({type(e).__name__}). "
                   "After a restart, this peer needs a new ticket.", file=sys.stderr, flush=True)
-        self.emit({"ev": "open", "name": link.name, "minutes": self._minutes()})
+        self.emit({"ev": "open", "name": link.name, "minutes": self._minutes(), "by": by})
         self._audit("accept", link)
 
     def _extend(self, link):
@@ -650,7 +665,7 @@ class PeerLink:
                 if link.state == "pending":
                     if kind != "accept":
                         break
-                    self._open(link)
+                    self._open(link, "the peer")
                 elif kind == "msg":
                     self._on_msg(link, frame)
                 elif kind == "renew":
@@ -730,13 +745,12 @@ class PeerLink:
         self.emit({"ev": "msg", "name": link.name, "text": sanitize(text), "mark": secrets.token_hex(4)})
 
     async def _on_renew(self, link):
-        """The peer asks for a renewal. Only the dialog of the local person extends the lease of this side."""
+        """The peer asks for a renewal. Only the answer of the local Claude agent extends the lease of this side."""
         if link.renew_busy:
             return
         link.renew_busy = True
         try:
-            ok = self._request_ok(link.peer) and await self._consent(
-                f'Renew the connection with "{link.name}" for {self._minutes()} more minutes?', sound=True, yes="Renew")
+            ok = self._request_ok(link.peer) and await self._decide(link.name, "renew")
             if link.state != "open":
                 return
             if ok:
@@ -770,6 +784,20 @@ class PeerLink:
         data = json.dumps(frame, ensure_ascii=False).encode() + b"\n"
         async with link.lock:
             await link.tx.write_all(data)
+
+    async def _decide(self, name, kind):
+        """Ask the Claude agent of this session about a request of a saved contact. No answer is a refusal."""
+        key = name.lower()
+        if key in self.asking:   # one request for each name at a time
+            return False
+        waiting = self.asking[key] = asyncio.get_running_loop().create_future()
+        self.emit({"ev": "request", "name": name, "kind": kind, "minutes": self._minutes()})
+        try:
+            return await asyncio.wait_for(waiting, PENDING_S)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            del self.asking[key]
 
     async def _consent(self, text, body="", sound=False, yes="Accept"):
         """One dialog at a time. The wait for a free dialog and the dialog together take PENDING_S at most."""
@@ -841,6 +869,8 @@ async def _dispatch(pl, req):
             result = await pl.connect(req.get("name"), req.get("ticket"))
         elif op == "send":
             result = await pl.send(req.get("name"), req.get("text"))
+        elif op == "answer":
+            result = await pl.answer(req.get("name"), req.get("accept"))
         elif op == "end":
             result = await pl.end(req.get("name"))
         elif op == "listen":

@@ -164,4 +164,14 @@ The second review found no critical defect and six important ones. Each has a te
 - [x] The mod drops peer text that waited behind a turn when the link closed.
 - [x] A socket that is not loopback stops the start of the helper.
 - [x] Also: `/peer stop`, the renewal line, a contact file that cannot be written, ASCII source.
+- [x] Push to `main`. CI on three systems: passed for commit `84cea53`.
+
+### Task 9: After the pairing, the agents decide (version 0.3.0)
+
+The owner said on 2026-10-12: a message must not need a popup, and after the first connection between two systems, the Claude agents accept or refuse a request.
+
+- [x] Helper: `send` shows no dialog. A request of a saved contact (a new link or a renewal) goes to the agent as a `request` event and waits for `answer`. A request with a ticket still goes to the person.
+- [x] Helper tests: agent accepts, agent refuses, no answer, the agent cannot answer a first pairing, a message shows no dialog. 39 tests pass.
+- [x] Mod: the tool `answer`, the request prompt, the new notes. 28 tests pass.
+- [x] End-to-end with two real sessions: the agent accepted, a question and an answer passed with no dialog, and a hostile message of a paired peer was refused.
 - [ ] Push to `main`. CI on three systems.

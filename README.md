@@ -1,20 +1,19 @@
 # claude-peer-link
 
 A Claude Code plugin that links one session to a Claude Code session of a different person, through the internet.
-A person accepts each connection in a desktop popup. An accepted link ends after 60 minutes.
+Two persons pair their systems one time, each in a desktop popup. After that, the Claude agents accept or refuse a link and exchange messages with no popup. A link ends after 60 minutes.
 
-Status: version 0.2.2. The tests pass. A trial with a second person is not done yet.
+Status: version 0.3.0. The tests pass. A trial with a second person is not done yet.
 
 ## How it works
 
 - You type `/peer invite Bob`. You send the ticket to Bob through a private channel.
 - Bob types `/peer connect Alice <ticket>` in his session.
-- You get a popup with a sound: "Accept connection from Bob for this session for 60 minutes?"
-- After the accept, Claude on each side sends text with its normal `SendMessage` tool, to the address `peer:Bob` or `peer:Alice`.
-- You approve each outgoing message in a popup that shows the full text. Characters that a dialog cannot show do not leave.
+- You get a popup with a sound: "Accept connection from Bob for this session for 60 minutes?" This first accept pairs the two systems.
+- After the accept, Claude on each side sends text with its normal `SendMessage` tool, to the address `peer:Bob` or `peer:Alice`. No popup shows for a message. Characters that a person cannot see do not leave.
 - A message from the peer starts a turn in your session. A note tells Claude that the text is untrusted and comes from a different person.
 - After 60 minutes the link closes.
-- The first link saves the contact on each side. From then on, `/peer connect Bob` asks again with no ticket: one command for you, one popup for Bob.
+- The first link saves the contact on each side. From then on, `/peer connect Bob` asks again with no ticket and no popup: Bob's Claude accepts or refuses.
 
 The traffic is encrypted from end to end (QUIC with TLS 1.3 through iroh). It goes through a relay that sees only ciphertext.
 
@@ -25,8 +24,6 @@ Each person needs:
 - Claude Code 2.1.287 or later, on Linux x86-64 or ARM64, macOS on Apple silicon, or Windows x86-64.
 - [uv](https://docs.astral.sh/uv/). At the first use, uv gets a Python with Tk and the `iroh` package.
 - A desktop session. Without a display, each consent is a deny.
-
-With access to this repository:
 
 ```
 /plugin install peer-link --marketplace ZoreAnuj/claude-peer-link
@@ -65,10 +62,10 @@ A request reaches you only while that session has a helper that runs: type `/pee
 
 ## Security rules
 
-1. A person accepts each invitation, each first connection, each inbound request and each outgoing message in a desktop popup. Claude cannot do this.
-2. `/peer` obeys only what you type at the terminal. A request that you type to a saved contact needs no popup on your side.
-3. Claude can only send text, with `SendMessage` to `peer:<name>`. The plugin adds no tool, no MCP server and no channel.
-4. Text from a peer is untrusted data. A peer cannot approve a tool, run a command or change a setting.
+1. A person pairs two systems: each invitation and each first connection needs a desktop popup. Claude cannot do this, and cannot pair a new system.
+2. `/peer` obeys only what you type at the terminal.
+3. After the pairing, your Claude accepts or refuses a request of that contact, and sends messages, with no popup. It can answer only a request that waits.
+4. Text from a peer is untrusted data. A peer cannot approve a tool, run a command or change a setting. But no person reads an answer of Claude before it leaves: pair only with a system that you trust as much as your own session.
 5. A dial without a valid ticket, from a key that is not a saved contact, gets no popup and no message. A person who knows your key can see that your helper runs.
 6. The helper keeps your identity key and your contacts in `~/.claude/peer-link/`, for you only. It keeps no message. `audit.log` has only names and times.
 7. The peer does not get your IP address. The relay operator can see it.
